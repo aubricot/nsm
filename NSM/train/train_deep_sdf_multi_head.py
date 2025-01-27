@@ -80,8 +80,12 @@ def train_deep_sdf(
                 decoder=models,
             )
             if ('val_paths' in config) & (config['val_paths'] is not None):
+                # if cuda is being used, empty the cache
+                if config['device'] == 'cuda':
+                    torch.cuda.empty_cache()
+                elif config['device'] == 'cpu':
+                    torch.mps.empty_cache()
                 
-                torch.cuda.empty_cache()
 
                 dict_loss = get_mean_errors(
                     mesh_paths=config['val_paths'],
@@ -106,6 +110,7 @@ def train_deep_sdf(
                     convergence=config['convergence_type_recon'],
                     sigma_rand_pts=config['sigma_rand_pts_recon'],
                     n_samples_latent_recon=config['n_samples_latent_recon'],
+                    device=config['device'],
                 )
 
                 log_dict.update(dict_loss)
