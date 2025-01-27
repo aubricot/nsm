@@ -255,12 +255,15 @@ def reconstruct_latent(
                 xyz_input = xyz
                 sdf_gt_ = sdf_gt
             
-            if n_samples_init is not None:
-                # if n_samples_init is not None, then we are ramping up the number of samples
-                # so we need to update the latent_input
-                latent_input_ = latent.expand(n_samples_, -1)
-            else:
-                latent_input_ = latent_input
+            # if n_samples_init is not None:
+            #     # if n_samples_init is not None, then we are ramping up the number of samples
+            #     # so we need to update the latent_input
+            #     latent_input_ = latent.expand(n_samples_, -1)
+            # else:
+            #     latent_input_ = latent_input
+
+            latent_input_ = latent.expand(n_samples_, -1)
+            
                 
             # concat latent and xyz that will be inputted into decoder. 
             inputs = torch.cat([latent_input_, xyz_input], dim=1)
