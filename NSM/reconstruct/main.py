@@ -208,31 +208,37 @@ def reconstruct_latent(
             else:
                 n_samples_ = n_samples
                 print('not changing... ', n_samples_)
+            
+            # make sure not trying to sample more points than available for a surface
+            n_samples_per_surface = []
+            n_samples_per_surface_ = n_samples_ // len(sdf_gt)
+            for surface_idx in range(len(sdf_gt)):
+                pts_surface_ = (pts_surface == surface_idx).nonzero(as_tuple=True)[0]
+                n_samples_per_surface.append(min(n_samples_per_surface_, pts_surface_.shape[0]))
+            
+            n_samples_ = sum(n_samples_per_surface)
 
             if n_samples_ != xyz.shape[0]:
                 if len(sdf_gt) > 1:
-                    # get equal number of samples from each surface
+                    # get roughly equal number of samples from each surface
                     # the list pts_surface is a list that indicates
                     # which surface each point in xyz belongs to
-                    n_samples_per = n_samples_ // len(sdf_gt)
                     # pre allocate array to store random samples
-                    if verbose is True:
-                        print(f"n_samples_per: {n_samples_per}")
                     
                     rand_samp = torch.empty(n_samples_, dtype=torch.int64, device=torch.device(device))
                     current_filled = 0
                     
-                    for idx in range(len(sdf_gt)):
+                    for idx, n_samples_per_surface_ in enumerate(n_samples_per_surface):
                         # get the locations of the points that belong to the current surface
                         pts_ = (pts_surface == idx).nonzero(as_tuple=True)[0]
                         if verbose is True:
-                            print(f"Surface {idx} has {pts_.shape[0]} points")
+                            print(f"Surface {idx} has {pts_.shape[0]} points, sampling {n_samples_per_surface_} points")
                         
                         perm = torch.randperm(pts_.shape[0])
-                        pts_ = pts_[perm[:n_samples_per]]
+                        pts_ = pts_[perm[:n_samples_per_surface_]]
                         
                         start_idx = current_filled
-                        end_idx = start_idx + n_samples_per
+                        end_idx = start_idx + n_samples_per_surface_
                         rand_samp[start_idx:end_idx] = pts_
                         current_filled = end_idx
                     if current_filled < n_samples_:
