@@ -87,7 +87,7 @@ def reconstruct_latent_S3(
     init_scale_method='max_rad',
     transform_update_patience=500,
     verbose=False,
-
+    device='cuda'
 ):
     """
     DeepSDF x Sim(3)
@@ -168,7 +168,7 @@ def reconstruct_latent_S3(
     
     if clamp_dist is not None:
         sdf_gt = torch.clamp(sdf_gt, -clamp_dist, clamp_dist)
-    sdf_gt = sdf_gt.cuda()
+    sdf_gt = sdf_gt.to(device)
     # Figure out information about LR updates
 
     # Initialize latent vector
@@ -203,7 +203,7 @@ def reconstruct_latent_S3(
     loss = 10 
 
     for step in range(num_iterations):
-        decoder.cuda()
+        decoder.to(device)
         decoder.eval()
 
         #update LR
@@ -245,7 +245,7 @@ def reconstruct_latent_S3(
         
         
         latent_input = latent.expand(n_samples, -1)
-        inputs = torch.cat([latent_input, scaled], dim=1).cuda()
+        inputs = torch.cat([latent_input, scaled], dim=1).to(device)
 
         pred_sdf = decoder(inputs)
 

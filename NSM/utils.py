@@ -2,7 +2,11 @@ import torch
 import os
 import math
 import json
-import schedulefree
+try:
+    import schedulefree
+except ImportError:
+    print("schedulefree not found, skipping import")
+    schedulefree = None
 import warnings
 
 
@@ -214,6 +218,8 @@ def get_optimizer(model, latent_vecs, lr_schedules, optimizer="Adam", weight_dec
     elif optimizer == "AdamW":
         optimizer = torch.optim.AdamW(list_params, weight_decay=weight_decay)
     elif optimizer == "schedule_free_AdamW":
+        if schedulefree is None:
+            raise ImportError("schedulefree not imported, because not installed")
         optimizer = schedulefree.AdamWScheduleFree(list_params, weight_decay=weight_decay)
     elif optimizer == "schedule_free_SGD":
         raise NotImplementedError
