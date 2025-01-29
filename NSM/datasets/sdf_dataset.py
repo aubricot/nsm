@@ -35,6 +35,11 @@ def get_rand_uniform_pts(n_pts, mins=(-1, -1, -1), maxs=(1, 1, 1)):
 
     Returns:
         np.ndarray: (n_pts, 3) array of points
+    
+    Tests: 
+        - Ensure returns np array 
+            - Ensure shape (n_pts, 3)
+            - Ensure points within input mins/maxs
     """
     rand_gen = np.random.uniform
 
@@ -73,6 +78,11 @@ def get_pts_center_and_scale(
         If pts_center is not None, then use that to center the points
         and use all of the points in pts to scale. This is used for
         the bone only, and then scaling based on bone + cartilage
+    
+    Tests:
+        - Ensure returns tuple length 2
+        - Ensure center is np array of shape (3,)
+        - Ensure scale is float
     """
 
     if pts_center is None:
@@ -126,7 +136,18 @@ def get_cube_mins_maxs(pts):
     
     Returns:
         tuple: (mins, maxs) of the points
+    
+    Raises:
+        ValueError: If input is empty or has wrong dimensions
+    
+    Tests:
+        - ensure returns tuple length 2
+        - ensure mins and maxs are np arrays of shape (3,)
     """
+    if pts.size == 0:
+        raise ValueError("Input array is empty")
+    if len(pts.shape) != 2 or pts.shape[1] != 3:
+        raise ValueError("Input must be a 2D array with shape (n_pts, 3)")
 
     mean = np.mean(pts, axis=0)
     norm_pts = pts - mean
@@ -181,6 +202,15 @@ def read_mesh_get_sampled_pts(
         dict: Dictionary of results
     
     Notes:
+        - Is this too big? Can this be broken into smaller functions and then
+        called in this function? 
+            - Its currently > 100 lines of code. 
+            - Some of the individual components are lengthy enough to be a single function.
+            - This will make it easier to test and debug
+                - Each individual function could be more easily tested. 
+
+    Tests:
+        - 
     """
     list_deprecated = ['return_scale', 'return_center', 'return_orig_pts', 'return_orig_mesh', 'return_new_mesh']
     for kwarg in kwargs:
@@ -289,6 +319,27 @@ def read_mesh_get_sampled_pts(
     return results
 
 def unpack_pts(data, pts_name='orig_pts'):
+    """
+    Unpacks the points loaded from a numpy.npz cache file. The cache is a 
+    dict of various params, e.g., xyz, sdf, indices of positive and negative
+    sdfs, for each surface. 
+
+    Args:
+        data (dict): Dictionary of data loaded from a numpy.npz cache file.
+        pts_name (str, optional): Name of the points to unpack. Defaults to 'orig_pts'.
+
+    Returns:
+        list: List of torch tensors of the points. The index position indicates
+        what the surface the points are from.
+    
+    Notes:
+        - 
+    
+    Tests:
+        - Give path npz file, load, ensure:
+            - returns list of torch tensors
+            - the list length is the number of surfaces
+    """
     # get original points...
     pts = []
     pts_arrays = [x for x in data.files if f'{pts_name}_' in x]
@@ -572,6 +623,15 @@ def read_meshes_get_sampled_pts(
     return results
 
 
+# check that probabilities 0-1
+def check_probabilities(p_):
+    if (p_<0) or (p_>1):
+        raise ValueError('Probabilities must be between 0 and 1')
+
+def check_probabilities_sum(p_near_, p_far_):
+    if (p_near_ + p_far_ > 1):
+        raise ValueError('sum of p_near_ & p_far_ must be <=1')
+
 class SDFSamples(torch.utils.data.Dataset):
     """
     Dataset class for sampling SDFs from meshes.
@@ -609,7 +669,7 @@ class SDFSamples(torch.utils.data.Dataset):
     def __init__(
         self,
         list_mesh_paths,
-        subsample=None,
+        subsample,
         n_pts=500000,
         p_near_surface=0.4,
         p_further_from_surface=0.4,
@@ -638,6 +698,21 @@ class SDFSamples(torch.utils.data.Dataset):
         test_load_times=True,
         uniform_pts_buffer=0.0,
     ):
+        
+        # p_near_surface & p_further_from_surface must be >=0, <=1
+        # sum of p_near_surface & p_further_from_surface must be <=1
+        if isinstance(p_near_surface, (list, tuple)) & isinstance(p_further_from_surface, (list, tuple)):
+            for p_near, p_far in zip(p_near_surface, p_further_from_surface):
+                check_probabilities(p_near)
+                check_probabilities(p_far)
+                check_probabilities_sum(p_near, p_far)
+        elif isinstance(p_near_surface, float) & isinstance(p_further_from_surface, float):
+            check_probabilities(p_near_surface)
+            check_probabilities(p_further_from_surface)
+            check_probabilities_sum(p_near_surface, p_further_from_surface)
+        else:
+            raise ValueError('p_near_surface & p_further_from_surface must be floats or lists/tuples of floats')
+        
         self.list_mesh_paths = list_mesh_paths
         self.subsample = subsample
         self.n_pts = n_pts
@@ -669,6 +744,12 @@ class SDFSamples(torch.utils.data.Dataset):
         self._memory_counter = 0
         self.test_load_times = test_load_times
         self.uniform_pts_buffer = uniform_pts_buffer
+        
+        # if store_data_in_memory is False & save_cache is False, then raise error
+        if (self.store_data_in_memory is False) and (self.save_cache is False):
+            raise ValueError('If store_data_in_memory is False, then save_cache must be True.'
+                             'when data not stored in memory, it is loaded from disk - but data is'
+                             'not saved to disk when save_cache is False.')
 
         # set defaults so can use same 'norm_and_scale_all_meshes' function
         # for single and multiple meshes
@@ -703,7 +784,12 @@ class SDFSamples(torch.utils.data.Dataset):
 
         self.data = []
         # Wrap this loading loop in a multiprocessing pool
-        print(f'CPU affinity:{os.sched_getaffinity(0)}') 
+        if self.verbose is True:
+            try:
+                print(f'CPU affinity:{os.sched_getaffinity(0)}')
+            except AttributeError:
+                # sched_getaffinity is not available on all platforms (eg., mac/windows)
+                print('CPU affinity not available on this platform')
         if self.multiprocessing is True:
             list_inputs = [(loc_mesh, self.verbose) for loc_mesh in self.list_mesh_paths]
             with Pool(processes=self.n_processes) as pool:
@@ -1121,7 +1207,11 @@ class SDFSamples(torch.utils.data.Dataset):
             print('type of reference mesh:', type(self.reference_mesh))
         
         if self.multiprocessing is True:
-            self.reference_mesh_path = os.path.join(self.cache_folder, f'REFERENCE_MESH_{int(np.random.rand() * 1000000000)}.vtk')
+            # update reference mesh path to be a has on the current time - so as to not end up with 
+            # multiple training runs of different tissues using the same reference mesh.
+            # this happens because the random seed is set - so all models get the same random number.
+            hashed_time = hashlib.md5(str(int(time.time())).encode()).hexdigest()
+            self.reference_mesh_path = os.path.join(self.cache_folder, f'REFERENCE_MESH_{hashed_time}.vtk')
             self.reference_mesh.save_mesh(self.reference_mesh_path)
             self.reference_mesh = None
 
@@ -1229,14 +1319,26 @@ class SDFSamples(torch.utils.data.Dataset):
                 
                 # idx_pos = data_['pos_idx'].repeat(data_['pos_idx'].size(0)//samples_per_sign + 1)
                 # perm_pos = torch.randperm(idx_pos.size(0))
-                perm_pos = torch.randperm(data_['pos_idx'][0].size(0))[:samples_per_sign]
-                idx_pos = data_['pos_idx'][0][perm_pos]
+                if isinstance(data_['pos_idx'], list):
+                    perm_pos = torch.randperm(data_['pos_idx'][0].size(0))[:samples_per_sign]
+                    idx_pos = data_['pos_idx'][0][perm_pos]
+                elif isinstance(data_['pos_idx'], torch.Tensor):
+                    perm_pos = torch.randperm(data_['pos_idx'].size(0))[:samples_per_sign]
+                    idx_pos = data_['pos_idx'][perm_pos]
+                else:
+                    raise ValueError('pos_idx must be a list or tensor')
 
                 # idx_neg = data_['neg_idx'].repeat(data_['neg_idx'].size(0)//samples_per_sign + 1)
                 # perm_neg = torch.randperm(idx_neg.size(0))
                 # idx_neg = perm_neg[:samples_per_sign]
-                perm_neg = torch.randperm(data_['neg_idx'][0].size(0))[:samples_per_sign]
-                idx_neg = data_['neg_idx'][0][perm_neg]
+                if isinstance(data_['neg_idx'], list):
+                    perm_neg = torch.randperm(data_['neg_idx'][0].size(0))[:samples_per_sign]
+                    idx_neg = data_['neg_idx'][0][perm_neg]
+                elif isinstance(data_['neg_idx'], torch.Tensor):
+                    perm_neg = torch.randperm(data_['neg_idx'].size(0))[:samples_per_sign]
+                    idx_neg = data_['neg_idx'][perm_neg]
+                else:
+                    raise ValueError('neg_idx must be a list or tensor')
                 toc_rand_sample = time.time()
                 if self.verbose is True:
                     print(f'rand sample time: {toc_rand_sample - tic_rand_sample}s')
@@ -1286,7 +1388,7 @@ class SDFSamples(torch.utils.data.Dataset):
             toc_whole_load = time.time()
             time_whole_load = toc_whole_load - tic_whole_load
             
-            if self.test_load_times is True:
+            if (self.test_load_times is True) and (self.store_data_in_memory is False):
                 data_['time'] = time_
                 data_['size'] = size
                 data_['mb_per_sec'] = size / time_
@@ -1333,6 +1435,13 @@ class MultiSurfaceSDFSamples(SDFSamples):
         n_processes=2,
         
     ):
+        # if n_pts is not a list, then make it a list that is 
+        # the same length as the number of meshes.
+        if not isinstance(n_pts, (list, tuple)):
+            n_pts = [n_pts] * len(list_mesh_paths[0])
+        if len(n_pts) == 1 and len(list_mesh_paths[0]) > 1:
+            n_pts = n_pts * len(list_mesh_paths[0])
+
         self.times = []
         self.data_size = []
         self.mb_per_sec = []
