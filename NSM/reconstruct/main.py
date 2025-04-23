@@ -204,10 +204,12 @@ def reconstruct_latent(
 
             if n_samples_init is not None:
                 n_samples_ = n_samples_init + int((max_n_samples - n_samples_init) * min(1.0, (step / n_steps_sample_ramp)))
-                print(n_samples_)
+                if verbose is True:
+                    print('ramping up... ', n_samples_)
             else:
                 n_samples_ = n_samples
-                print('not changing... ', n_samples_)
+                if verbose is True:
+                    print('not changing... ', n_samples_)
             
             # make sure not trying to sample more points than available for a surface
             n_samples_per_surface = []
@@ -354,8 +356,8 @@ def reconstruct_latent(
 
         # Print progress/loss as appropriate
         if step % 50 == 0:
-            print('Step: ', step, 'Loss: ', loss_.item())
             if verbose is True:
+                print('Step: ', step, 'Loss: ', loss_.item())
                 print('\tLatent norm: ', latent.norm)
         
         # Log to wandb as appropriate
