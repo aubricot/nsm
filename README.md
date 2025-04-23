@@ -12,96 +12,48 @@ Steps to update this package for new repository:
      - To do - can dependencies read/update from requirements.txt?
 
 
-# Install Instructions
-
-```bash
-conda create -n NSM python=3.8
-conda activate NSM
-```
-
-
-``` bash
-conda install pytorch==2.0.0 torchvision==0.15.0 torchaudio==2.0.0 pytorch-cuda=11.7 -c pytorch -c nvidia
-make requirements
-```
-
-```bash
-# install in development mode... 
-pip install -e .
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Install - only tried for SDF stuff
-<!-- mamba install pytorch=1.13.0 torchvision pytorch-cuda=11.6 -c pytorch -c nvidia -y
-mamba install -c fvcore -c iopath -c conda-forge fvcore iopath -y
-mamba install -c bottler nvidiacub -y
-mamba install pytorch3d -c pytorch3d -y
-
-make requirements -->
-
-
-mamba install pytorch torchvision pytorch-cuda fvcore iopath nvidiacub pytorch3d -c pytorch -c nvidia -c fvcore -c iopath -c conda-forge -c bottler -c pytorch3d -y
-make requirements
-
-git clone https://github.com/gattia/pymskt
-cd pymskt
-make requirements 
-make install
-
-
 # Installation
 
-You should be able to install this by cloning, navigating to this root directory, and installing with pip:
+## Standard Installation
 
-Install pymskt: https://github.com/gattia/pymskt
+```bash
+# Create and activate conda environment
+conda create -n NSM python=3.8
+conda activate NSM
 
+# Install PyTorch (ensure compatibility with your CUDA version if using GPU)
+# See: https://pytorch.org/get-started/locally/
+conda install pytorch==2.0.0 torchvision==0.15.0 torchaudio==2.0.0 pytorch-cuda=11.7 -c pytorch -c nvidia
 
+# Install package requirements
+make requirements
 
-
+# Install the NSM package
+pip install .
 ```
+
+## Development Installation
+If you plan to contribute to the development of NSM, install it in editable mode. This means changes you make to the source code will be immediately reflected when you use the package.
+
+```bash
+# Clone the repository
 git clone https://github.com/gattia/NSM
 cd NSM
 
+# Create and activate conda environment
 conda create -n NSM python=3.8
+conda activate NSM
 
-pip install . 
-
-# OR
-make install
-```
-
-### Install for development
-This method of install will install in editable mode. This means that the code wont be packaged and saved
-in your python's `site-packages`, instead `site-packages` will point to this directory. So, if the code 
-changes in here, so will the version of this package used on your local build. 
-```
-git clone https://github.com/gattia/NSM
-cd NSM
-
-conda create -n NSM python=3.8
-
+# Install development dependencies (includes PyTorch, requirements, and dev tools)
 make dev
+
+# Install NSM in editable mode
 make install-dev
 ```
 
 # Examples
 
-Navigate to the examples directory and run the scripts: 
-```bash
-cd examples
-python examples/example_1.py
-```
+*Add links to example notebooks or scripts here.*
 
 # Development / Contributing
 
@@ -148,4 +100,5 @@ home dir for the docs to be `/docs` on the `main` branch. Example here:
 
 
 # License
-MIT License
+
+This project is licensed under the terms of the license specified in the [LICENSE](LICENSE) file.
