@@ -205,11 +205,9 @@ def reconstruct_latent(
             if n_samples_init is not None:
                 n_samples_ = n_samples_init + int((max_n_samples - n_samples_init) * min(1.0, (step / n_steps_sample_ramp)))
                 if verbose is True:
-                    print('ramping up... ', n_samples_)
+                    print('ramping up samples... ', n_samples_)
             else:
                 n_samples_ = n_samples
-                if verbose is True:
-                    print('not changing... ', n_samples_)
             
             # make sure not trying to sample more points than available for a surface
             n_samples_per_surface = []
