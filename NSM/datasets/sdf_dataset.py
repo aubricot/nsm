@@ -424,6 +424,11 @@ def read_meshes_get_sampled_pts(
     orig_meshes = []
     orig_pts = []
     for path in paths:
+        if path is None:
+            print(f'Mesh is None... returning None for meshes and pts, {path}')
+            orig_meshes.append(None)
+            orig_pts.append(None)
+            continue
         if os.path.exists(path) is False:
             print(f'Skipping ... path does not exist, {path}')
             return None
@@ -446,6 +451,11 @@ def read_meshes_get_sampled_pts(
     new_meshes = []
     new_pts = []
     for mesh_idx, orig_mesh in enumerate(orig_meshes):
+        if orig_mesh is None:
+            print(f'Mesh is None... returning None for meshes and pts, {paths[mesh_idx]}')
+            new_meshes.append(None)
+            new_pts.append(None)
+            continue
         new_mesh_ = orig_mesh.copy()
         new_pts.append(new_mesh_.point_coords)
         new_meshes.append(new_mesh_)
@@ -474,6 +484,10 @@ def read_meshes_get_sampled_pts(
 
         # apply transform to all meshes
         for idx, new_mesh in enumerate(new_meshes):
+            if new_mesh is None:
+                print(f'Mesh is None... returning None for meshes and pts, {paths[idx]}')
+                new_pts[idx] = None
+                continue
             new_mesh.apply_transform_to_mesh(icp_transform)
             new_pts[idx] = new_mesh.point_coords
 
@@ -488,7 +502,11 @@ def read_meshes_get_sampled_pts(
     if (center_pts is True) or (norm_pts is True):
         print('Scaling and centering meshes')
         if scale_all_meshes is True:
-            pts_ = np.concatenate(new_pts, axis=0)
+            if None in new_pts:
+                new_pts_ = [x for x in new_pts if x is not None]
+                pts_ = np.concatenate(new_pts_, axis=0)
+            else:
+                pts_ = np.concatenate(new_pts, axis=0)
             if center_all_meshes is True:
                 # Set as None - becuasse scaling and centering on same data
                 pts_center = None
@@ -501,7 +519,11 @@ def read_meshes_get_sampled_pts(
             if center_all_meshes is True:
                 # set specific points to center because scale/center are not on
                 # the same data
-                pts_center = np.concatenate(new_pts, axis=0)
+                if None in new_pts:
+                    new_pts_ = [x for x in new_pts if x is not None]
+                    pts_center = np.concatenate(new_pts_, axis=0)
+                else:
+                    pts_center = np.concatenate(new_pts, axis=0)
             else:
                 # Set as None - becuasse scaling and centering on same data
                 pts_center = None
@@ -516,6 +538,8 @@ def read_meshes_get_sampled_pts(
         )
 
         for pts_idx, new_pts_ in enumerate(new_pts):
+            if new_pts_ is None:
+                continue
             new_pts[pts_idx] = (new_pts_ - center)/scale
     else:
         # Do nothing to the points because they are left the same.
@@ -527,6 +551,8 @@ def read_meshes_get_sampled_pts(
     tic = time.time()
 
     for mesh_idx, new_mesh in enumerate(new_meshes):
+        if new_mesh is None:
+            continue
         new_mesh.point_coords = new_pts[mesh_idx]
     
     results['new_pts'] = new_pts
@@ -537,12 +563,15 @@ def read_meshes_get_sampled_pts(
         pts_surface = []
 
         if None in sigma:
-            pts_cube = np.concatenate(new_pts, axis=0)
+            new_pts_ = [x for x in new_pts if x is not None]
+            pts_cube = np.concatenate(new_pts_, axis=0)
             mins, maxs = get_cube_mins_maxs(pts_cube)
             mins = mins - uniform_pts_buffer/2 * (maxs-mins)
             maxs = maxs + uniform_pts_buffer/2 * (maxs-mins)
 
         for new_pts_idx, new_mesh_ in enumerate(new_meshes):
+            if new_mesh_ is None:
+                continue
             if n_pts[new_pts_idx]  > 0:
                 if sigma[new_pts_idx] is not None:
                     rand_pts_ = new_mesh_.rand_pts_around_surface(n_pts=n_pts[new_pts_idx], surface_method='random', distribution=rand_function, sigma=sigma[new_pts_idx])
@@ -559,10 +588,17 @@ def read_meshes_get_sampled_pts(
                 pts_surface.append(np.zeros((0,3)))
         
         rand_pts = np.concatenate(rand_pts, axis=0)
+        # NOTE: pts_surface indices correspond to original mesh positions in the input list,
+        # not contiguous indices. If meshes [mesh0, None, mesh2] are passed, points will be
+        # labeled as surface 0 and surface 2 (no surface 1 points exist).
+        # This works correctly with reconstruction code which handles missing surfaces.
         pts_surface = np.concatenate(pts_surface, axis=0)
 
         
         for new_mesh in new_meshes:
+            if new_mesh is None:
+                rand_sdf.append(None)
+                continue
             tic_ = time.time()
             print(rand_pts.shape, new_mesh.point_coords.shape)
             print(rand_pts.dtype, new_mesh.point_coords.dtype)
@@ -580,9 +616,14 @@ def read_meshes_get_sampled_pts(
         # but need to actually calculate the SDFs for the other
         # meshes.
         for mesh_idx, new_mesh in enumerate(new_meshes):
+            if new_mesh is None:
+                sdfs.append(None)
+                continue
             sdfs_ = []
 
             for pts_idx, new_pts_ in enumerate(new_pts):
+                if new_pts_ is None:
+                    continue
                 if verbose is True:
                     print('mesh_idx, new_mesh point_coords shape', mesh_idx, new_mesh.point_coords.shape)
                 if pts_idx == mesh_idx:
@@ -600,11 +641,19 @@ def read_meshes_get_sampled_pts(
             sdfs.append(np.concatenate(sdfs_, axis=0))
 
         pts_surface = []
+        # NOTE: pts_surface indices correspond to original mesh positions in the input list,
+        # not contiguous indices. If meshes [mesh0, None, mesh2] are passed, points will be
+        # labeled as surface 0 and surface 2 (no surface 1 points exist).
+        # This works correctly with reconstruction code which handles missing surfaces.
         for pts_idx, new_pts_ in enumerate(new_pts):
+            if new_pts_ is None:
+                continue
             pts_surface.append([pts_idx] * new_pts_.shape[0])
         pts_surface = np.concatenate(pts_surface, axis=0)
 
-        results['pts'] = np.concatenate(new_pts, axis=0)
+        new_pts_filtered = [x for x in new_pts if x is not None]
+        results['pts'] = np.concatenate(new_pts_filtered, axis=0)
+            
         results['sdf'] = sdfs
         results['pts_surface'] = pts_surface
     
@@ -1660,7 +1709,12 @@ class MultiSurfaceSDFSamples(SDFSamples):
                 data['xyz'][pts_idx:pts_idx + sum(n_pts_), :] = torch.from_numpy(xyz_).float()
 
                 for mesh_idx, _sdfs_ in enumerate(sdfs_):
-                    data['gt_sdf'][pts_idx:pts_idx + sum(n_pts_), mesh_idx] = torch.from_numpy(_sdfs_).float()
+                    if _sdfs_ is None:
+                        # If mesh was None, fill with NaN to indicate missing data
+                        # don't need this now.. but can handle training on incomplete data in the future. 
+                        data['gt_sdf'][pts_idx:pts_idx + sum(n_pts_), mesh_idx] = float('nan')
+                    else:
+                        data['gt_sdf'][pts_idx:pts_idx + sum(n_pts_), mesh_idx] = torch.from_numpy(_sdfs_).float()
                 pts_idx += sum(n_pts_)
             
             # Drop points that have are labeled as being inside
@@ -1698,19 +1752,32 @@ class MultiSurfaceSDFSamples(SDFSamples):
 
     def remove_overlapping_points(self, data):
         sdf_ = data['gt_sdf'].clone()
-        sdf_[sdf_ < 0] = -1
-        sdf_[sdf_ > 0] = 1
-        sdf_[sdf_ == 0] = 0
-        total = torch.sum(sdf_, axis=1)
+        
+        # Check if we have None values (represented as NaN)
+        non_none_mask = ~torch.isnan(sdf_).all(dim=0)
+        
+        if non_none_mask.sum() < 2:
+            return data, 0  # Can't have overlaps with fewer than 2 surfaces
+
+        # Only process non-None columns for overlap detection
+        sdf_filtered = sdf_[:, non_none_mask]
+        
+        sdf_filtered[sdf_filtered < 0] = -1
+        sdf_filtered[sdf_filtered > 0] = 1
+        sdf_filtered[sdf_filtered == 0] = 0
+        total = torch.sum(sdf_filtered, axis=1)
 
         out_out = torch.sum(total == 2)
         out_in = torch.sum(total == 0)
         in_in = torch.sum(total == -2)
 
-        # Drop overlapping points
-        data['gt_sdf'] = data['gt_sdf'][total != -2, :]
-        data['xyz'] = data['xyz'][total != -2, :]
-
+        # Create mask for points to keep (not overlapping)
+        keep_mask = total != -2
+        
+        # Apply the mask to remove overlapping points from the full dataset
+        # This preserves the None columns while removing problematic points
+        data['gt_sdf'] = data['gt_sdf'][keep_mask, :]
+        data['xyz'] = data['xyz'][keep_mask, :]
 
         if self.verbose is True:
             print('total shape', total.shape)
@@ -1718,6 +1785,7 @@ class MultiSurfaceSDFSamples(SDFSamples):
             print('out_out', out_out)
             print('out_in', out_in)
             print('in_in', in_in)
+            print(f'Removed {in_in} overlapping points')
         
         return data, in_in
 

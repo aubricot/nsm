@@ -47,8 +47,11 @@ def reconstruct_latent_sdf_gt_type_check(sdf_gt, verbose=False):
     if verbose is True:
         print('\tsdf_gt len:', len(sdf_gt))
         for sdf in sdf_gt:
-            print('\tsdf shape:', sdf.shape)
-            print('\tsdf type:', type(sdf))
+            if sdf is not None:
+                print('\tsdf shape:', sdf.shape)
+                print('\tsdf type:', type(sdf))
+            else:
+                print('\tsdf is None')
 
     return sdf_gt
 
@@ -87,9 +90,13 @@ def reconstruct_latent_get_lr_update_freq(n_lr_updates, num_iterations):
     
     return adjust_lr_every
 
-def reconstruct_latent_preprocess_sdf_gt(sdf_gt, clamp_dist, device='cuda'):
+def reconstruct_latent_preprocess_sdf_gt(sdf_gt, clamp_dist, device='cuda', verbose=False):
     # Set a clamp (maximum) distance to "model"
     for sdf_idx, sdf in enumerate(sdf_gt):
+        if sdf is None:
+            if verbose is True:
+                print(f'sdf_gt[{sdf_idx}] is None, skipping surface {sdf_idx}')
+            continue
         if clamp_dist is not None:
             sdf = torch.clamp(sdf, -clamp_dist, clamp_dist)
         # Move to GPU
@@ -147,7 +154,7 @@ def reconstruct_latent(
     else:
         n_samples_init = None
     
-    sdf_gt = reconstruct_latent_preprocess_sdf_gt(sdf_gt, clamp_dist, device=device)
+    sdf_gt = reconstruct_latent_preprocess_sdf_gt(sdf_gt, clamp_dist, device=device, verbose=verbose)
     
 
     # Initialize random latent vector directly on GPU
@@ -250,7 +257,7 @@ def reconstruct_latent(
                 
                 # Use rand_samp indices to get xyz and sdf_gt
                 xyz_input = xyz[rand_samp, ...]
-                sdf_gt_ = [x[rand_samp, ...] for x in sdf_gt]
+                sdf_gt_ = [x[rand_samp, ...] if x is not None else None for x in sdf_gt]
             else:
                 xyz_input = xyz
                 sdf_gt_ = sdf_gt
@@ -307,6 +314,13 @@ def reconstruct_latent(
                                 if verbose is True:
                                     print(f'sdf_idx ({sdf_idx}) >= len(sdf_gt_) ({len(sdf_gt)})... exiting')
                                 break
+                            
+                            # if sdf_gt_[sdf_idx] is None, then skip this surface
+                            # in fitting latent
+                            if sdf_gt_[sdf_idx] is None:
+                                if verbose is True:
+                                    print(f'sdf_gt_[sdf_idx] is None, skipping surface {sdf_idx}')
+                                continue
 
                             if difficulty_weight is not None:
                                 error_sign = torch.sign(sdf_gt_[sdf_idx][current_pt_idx:current_pt_idx + current_batch_size, ...].squeeze() - pred_sdf[:, sdf_idx].squeeze())
@@ -578,6 +592,10 @@ def reconstruct_mesh(
         xyz = torch.from_numpy(xyz).float()
     if multi_object is True:
         for sdf_idx, sdf_gt_ in enumerate(sdf_gt):
+            if sdf_gt_ is None:
+                if verbose is True:
+                    print(f'sdf_gt[{sdf_idx}] is None, skipping surface {sdf_idx}')
+                continue
             if not isinstance(sdf_gt_, torch.Tensor):
                 sdf_gt[sdf_idx] = torch.from_numpy(sdf_gt_).float()
 
