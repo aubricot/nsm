@@ -6,6 +6,12 @@ from vtk.util.numpy_support import numpy_to_vtk
 
 from NSM.utils import print_gpu_memory
 
+EPS = 1e-8
+def assert_finite(tensor, name):
+    """Helper function to check for NaN/Inf values"""
+    if not torch.isfinite(tensor).all():
+        raise ValueError(f"{name} contains NaN/Inf")
+
 def add_cell_idx(mesh):
     if 'cell_idx' not in mesh.scalar_names:
         n_cells = mesh.mesh.GetNumberOfCells()
@@ -37,7 +43,7 @@ def sdf_gradients(sdf_model, points, latent, verbose=False):
 
     if isinstance(latent, np.ndarray):
         latent = torch.tensor(latent) 
-    elif (latent, torch.tensor):
+    elif isinstance(latent, torch.Tensor):
         pass
     else:
         raise Exception(f'unknown data type {type(latent)}')
@@ -51,6 +57,7 @@ def sdf_gradients(sdf_model, points, latent, verbose=False):
 
     # Forward pass
     sdf_values = sdf_model(p)
+    assert_finite(sdf_values, "SDF values")
 
     # Initialize a zero gradient tensor
     grad_output = torch.zeros_like(sdf_values)
@@ -67,7 +74,9 @@ def sdf_gradients(sdf_model, points, latent, verbose=False):
         sdf_values.backward(gradient=grad_output, retain_graph=True)
 
         # Extract and store the gradient
-        gradients.append(p.grad.clone().detach().cpu())
+        grad = p.grad.clone().detach().cpu()
+        assert_finite(grad, f"Gradients for surface {i}")
+        gradients.append(grad)
 
         # Reset the gradients of input and grad_output for the next loop
         p.grad.zero_()
@@ -94,6 +103,11 @@ def slerp_latent(latent1, latent2, step):
     
     latent1_mag = np.linalg.norm(latent1)
     latent2_mag = np.linalg.norm(latent2)
+    
+    # Protect against zero magnitude latents
+    if latent1_mag < EPS or latent2_mag < EPS:
+        # Fall back to linear interpolation if either vector has near-zero magnitude
+        return linear_interp_latent(latent1, latent2, step)
 
     latent1_norm = latent1 / latent1_mag
     latent2_norm = latent2 / latent2_mag
@@ -157,15 +171,24 @@ def update_positions(model, new_latent, current_points, surface_idx=0, verbose=T
     grads, sdfs = sdf_gradients(model, current_points, new_latent, verbose=verbose)
 
     grads = grads[surface_idx][:,-3:]
-    grad_norm = torch.norm(grads, dim=1)[:,None]
     
-    grads = grads/grad_norm
+    # Safe normalization with eps clamping
+    grad_norm = torch.norm(grads, dim=1, keepdim=True)
+    zero_mask = grad_norm < EPS
+    grad_norm = grad_norm.clamp_min(EPS)  # avoid division by zero
+    grads = grads / grad_norm
+    grads[zero_mask.squeeze()] = 0.0  # leave flat points unchanged
+    
+    assert_finite(grads, "Normalized gradients")
     
     sdfs = sdfs[:, surface_idx]
+    assert_finite(sdfs, "SDF values")
     
     points_step = grads * sdfs[:,None]
+    assert_finite(points_step, "Point step")
     
     new_points = current_points.cpu() - points_step
+    assert_finite(new_points, "New points")
     
     return new_points
 
