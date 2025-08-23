@@ -20,70 +20,106 @@ def add_cell_idx(mesh):
         cells_.SetName('cell_idx')
         mesh.mesh.GetCellData().AddArray(cells_)
 
-def sdf_gradients(sdf_model, points, latent, verbose=False):
-    '''
-    Function that computes gradients for a set of points/vertices. If the 
-    points are on the surface of the specific latent, then they are 
-    equivalent to the normal vectors of the surface. If they are not
-    on the surface, then they are the gradient of the SDF at that point and
-    indicate the direction of the steepest ascent.
+def sdf_gradients(sdf_model, points, latent, surface_idx=None, verbose=False):
+    """
+    Computes gradients of SDF with respect to 3D positions (not latent).
+    If surface_idx is provided, computes only that surface's gradient (fastest).
+    Otherwise returns gradients for all surfaces.
+    
+    If the points are on the surface of the specific latent, then the gradients
+    are equivalent to the normal vectors of the surface. If they are not on the
+    surface, then they are the gradient of the SDF at that point and indicate
+    the direction of the steepest ascent.
 
     Args:
     - sdf_model (nn.Module): The model that computes the SDF
-    - points (np.ndarray or torch.tensor): The points for which to compute the gradients
+    - points (np.ndarray or torch.tensor): The points for which to compute gradients (B, 3)
     - latent (np.ndarray or torch.tensor): The latent vector for the specific shape
-    - verbose (bool): If True, print the GPU memory usage after each gradient step
+    - surface_idx (int, optional): If provided, only compute gradients for this surface (0-based)
+    - verbose (bool): If True, print the GPU memory usage after gradient computation
 
     Returns:
-    - gradients (list): A list of gradients for each point
-    - sdf_values (np.ndarray): The SDF values for each point
-    '''
-    if isinstance(points, np.ndarray):
-        points = torch.tensor(points)
+    - gradients (torch.Tensor): 
+        - If surface_idx provided: gradients for that surface only (B, latent_dim + 3)
+        - If surface_idx is None: list of gradients for each surface
+    - sdf_values (torch.Tensor): The SDF values for each point (B, num_surfaces)
+    """
+    # Convert to tensors
+    if isinstance(points, np.ndarray): 
+        points = torch.from_numpy(points)
+    if isinstance(latent, np.ndarray): 
+        latent = torch.from_numpy(latent)
 
-    if isinstance(latent, np.ndarray):
-        latent = torch.tensor(latent) 
-    elif isinstance(latent, torch.Tensor):
-        pass
-    else:
-        raise Exception(f'unknown data type {type(latent)}')
+    # Get device and dtype from model
+    device = next(sdf_model.parameters()).device
+    dtype = next(sdf_model.parameters()).dtype
+    points = points.to(device=device, dtype=dtype)
+    latent = latent.to(device=device, dtype=dtype)
+
+    B = points.shape[0]
+    D_lat = latent.shape[-1]
+    assert points.shape[-1] == 3, "points must be (B, 3)"
     
-    # Repeat latent vector for each point
-    vecs = latent.repeat(points.shape[0], 1)
-    # concatenate latent vector with points, and add 
-    # to same device as model
-    device = next(sdf_model.parameters()).device  # Get the device from the model
-    p = torch.cat([vecs, points], axis=1).to(device, dtype=torch.float).detach().requires_grad_(True)
+    # Handle latent vector shape
+    if latent.ndim == 1: 
+        latent = latent.unsqueeze(0)          # (1, D_lat)
+    if latent.shape[0] == 1: 
+        latent = latent.expand(B, -1)         # (B, D_lat)
+
+    # Only positions need gradients (more efficient than full input)
+    pos = points.detach().requires_grad_(True)     # (B, 3)
+    vecs = latent.detach()                         # (B, D_lat) no grad needed
+
+    # Concatenate for model input
+    p = torch.cat([vecs, pos], dim=1)              # (B, D_lat + 3)
+
+    # Set model to eval mode for stability during gradient computation
+    was_training = sdf_model.training
+    sdf_model.eval()
 
     # Forward pass
-    sdf_values = sdf_model(p)
+    sdf_values = sdf_model(p)                      # (B, Ns)
     assert_finite(sdf_values, "SDF values")
 
-    # Initialize a zero gradient tensor
-    grad_output = torch.zeros_like(sdf_values)
+    def _finish(g):
+        if verbose:
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            print_gpu_memory()
+        return g.detach().cpu(), sdf_values.detach().cpu()
 
-    # Container for gradients
+    # Fast path: single surface only
+    if surface_idx is not None:
+        y = sdf_values[:, surface_idx]             # (B,)
+        # Use sum() trick - equivalent to one-hot grad_outputs but more efficient
+        grad_pos, = torch.autograd.grad(
+            y.sum(), pos, create_graph=False, retain_graph=False, allow_unused=False
+        )
+        sdf_model.train(was_training)
+        assert_finite(grad_pos, f"Gradients for surface {surface_idx}")
+        
+        # Reconstruct full gradient (latent + position) for backward compatibility
+        grad_latent_zeros = torch.zeros(B, D_lat, device=device, dtype=dtype)
+        full_grad = torch.cat([grad_latent_zeros, grad_pos], dim=1)
+        return _finish(full_grad)                  # (B, D_lat + 3), (B, Ns)
+
+    # All surfaces (for backward compatibility)
+    Ns = sdf_values.shape[1]
     gradients = []
 
-    # Loop through each SDF output
-    for i in range(sdf_values.shape[1]):
-        # Set the gradient for the current SDF to 1
-        grad_output[:, i] = 1.0
-
-        # Backward pass for gradient computation
-        sdf_values.backward(gradient=grad_output, retain_graph=True)
-
-        # Extract and store the gradient
-        grad = p.grad.clone().detach().cpu()
-        assert_finite(grad, f"Gradients for surface {i}")
-        gradients.append(grad)
-
-        # Reset the gradients of input and grad_output for the next loop
-        p.grad.zero_()
-        grad_output[:, i] = 0.0
-        if verbose is True:
-            print_gpu_memory()
-
+    for i in range(Ns):
+        y = sdf_values[:, i]
+        grad_pos, = torch.autograd.grad(
+            y.sum(), pos, create_graph=False, retain_graph=(i < Ns - 1)
+        )
+        assert_finite(grad_pos, f"Gradients for surface {i}")
+        
+        # Reconstruct full gradient for backward compatibility
+        grad_latent_zeros = torch.zeros(B, D_lat, device=device, dtype=dtype)
+        full_grad = torch.cat([grad_latent_zeros, grad_pos], dim=1)
+        gradients.append(full_grad.detach().cpu())
+    
+    sdf_model.train(was_training)
     return gradients, sdf_values.detach().cpu()
 
 
@@ -168,9 +204,11 @@ def update_positions(model, new_latent, current_points, surface_idx=0, verbose=T
     else:
         current_points = current_points.to(device)
         
-    grads, sdfs = sdf_gradients(model, current_points, new_latent, verbose=verbose)
+    # Use optimized single-surface gradient computation
+    grads, sdfs = sdf_gradients(model, current_points, new_latent, surface_idx=surface_idx, verbose=verbose)
 
-    grads = grads[surface_idx][:,-3:]
+    # Extract spatial gradients (last 3 dimensions)
+    grads = grads[:, -3:]
     
     # Safe normalization with eps clamping
     grad_norm = torch.norm(grads, dim=1, keepdim=True)
@@ -181,6 +219,7 @@ def update_positions(model, new_latent, current_points, surface_idx=0, verbose=T
     
     assert_finite(grads, "Normalized gradients")
     
+    # Extract SDF values for the specific surface
     sdfs = sdfs[:, surface_idx]
     assert_finite(sdfs, "SDF values")
     
