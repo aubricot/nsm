@@ -1,13 +1,16 @@
 import os
-os.environ['LOC_SDF_CACHE'] = ''
+
+os.environ["LOC_SDF_CACHE"] = ""
 import pytest
 import torch
 from NSM.reconstruct import reconstruct_latent
+
 
 # Mock decoder class
 class MockDecoder(torch.nn.Module):
     def forward(self, x):
         return x[:, :1]  # Return the first column as a mock prediction
+
 
 @pytest.fixture
 def setup_data(n_pts=100):
@@ -17,10 +20,11 @@ def setup_data(n_pts=100):
     # Create sample input data
     xyz = torch.rand(n_pts, 3)  # 100 points in 3D space
     sdf_gt = torch.rand(n_pts, 1)  # Corresponding SDF values
-    # needs to tell what surface each point is associated with: 
+    # needs to tell what surface each point is associated with:
     pts_surface = [0] * n_pts
 
     return decoders, xyz, sdf_gt, pts_surface
+
 
 def test_reconstruct_latent_basic(setup_data):
     decoders, xyz, sdf_gt, pts_surface = setup_data
@@ -36,12 +40,13 @@ def test_reconstruct_latent_basic(setup_data):
         xyz=xyz,
         sdf_gt=sdf_gt,
         pts_surface=pts_surface,
-        device='cpu'
+        device="cpu",
     )
 
     # Check the output types
     assert isinstance(loss, torch.Tensor), "Loss should be a tensor"
     assert isinstance(latent, torch.Tensor), "Latent should be a tensor"
+
 
 def test_reconstruct_latent_convergence(setup_data):
     decoders, xyz, sdf_gt, pts_surface = setup_data
@@ -54,13 +59,14 @@ def test_reconstruct_latent_convergence(setup_data):
         xyz=xyz,
         sdf_gt=sdf_gt,
         pts_surface=pts_surface,
-        convergence='overall_loss',
+        convergence="overall_loss",
         convergence_patience=5,
-        device='cpu'
+        device="cpu",
     )
 
     # Check if the function converged
     assert loss < 100, "Loss should be less than initial value indicating convergence"
+
 
 def test_reconstruct_latent_invalid_input(n_pts=100):
     decoders = [MockDecoder()]
@@ -76,7 +82,8 @@ def test_reconstruct_latent_invalid_input(n_pts=100):
             xyz=xyz,
             sdf_gt=sdf_gt,
             pts_surface=pts_surface,
-            device='cpu'
+            device="cpu",
         )
+
 
 # Additional tests can be added for different configurations and edge cases

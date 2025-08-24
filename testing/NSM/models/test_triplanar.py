@@ -1,16 +1,12 @@
 from NSM.models import TriplanarDecoder
 import torch
 
-def test_triplanar(
-    n_pts=1000,
-    latent_size=512,
-    deep_size=2,
-    n_objects=2
-):
-    # create a latent 
+
+def test_triplanar(n_pts=1000, latent_size=512, deep_size=2, n_objects=2):
+    # create a latent
     latent = torch.zeros(n_pts, latent_size)
-    latent[:n_pts//2, :] = torch.rand(latent_size)
-    latent[n_pts//2:, :] = torch.rand(latent_size)
+    latent[: n_pts // 2, :] = torch.rand(latent_size)
+    latent[n_pts // 2 :, :] = torch.rand(latent_size)
     # create theoretic xyz points
     xyz = (torch.rand(n_pts, 3) * 2) - 1
 
@@ -19,7 +15,7 @@ def test_triplanar(
         latent_dim=latent_size,
         n_objects=n_objects,
         conv_deep_image_size=deep_size,
-        conv_pred_sdf=True
+        conv_pred_sdf=True,
     )
 
     # setup optimizer for triplanar
@@ -41,5 +37,5 @@ def test_triplanar(
     assert sdf.sum() < loss
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     test_triplanar()
