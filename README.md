@@ -146,9 +146,19 @@ make clean
 Run tests with pytest:
 
 ```bash
-pytest                          # Run all tests
-pytest testing/NSM/models/     # Run model tests
-make test                       # Use Makefile
+# Run all tests
+pytest
+
+# Run specific test modules
+pytest testing/NSM/models/                     # Model loader tests
+pytest testing/NSM/datasets/                   # Dataset tests (including multi-surface registration)
+
+# Run tests with verbose output
+pytest -v
+
+# Use Makefile shortcuts
+make test                                       # Run all tests
+make test-loader                               # Run only model loader tests
 ```
 
 ## Coverage
@@ -162,7 +172,11 @@ If you want to contribute, please read the documentation in `CONTRIBUTING.md` an
 
 ## Documentation
 
-Documentation is planned for future development. Consider using `pdoc` for auto-generated docs:
+Additional documentation can be found in the [`docs/`](docs/) folder:
+
+- [`docs/MULTI_SURFACE_REGISTRATION.md`](docs/MULTI_SURFACE_REGISTRATION.md) - Multi-surface registration functionality
+
+API documentation is planned for future development. Consider using `pdoc` for auto-generated docs:
 
 ```bash
 # TODO: Set up documentation generation
