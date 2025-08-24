@@ -12,6 +12,9 @@ from NSM.datasets import (
     read_mesh_get_sampled_pts, 
     read_meshes_get_sampled_pts
 )
+from NSM.datasets.sdf_dataset import (
+    combine_meshes
+)
 from NSM.mesh import create_mesh
 
 import numpy as np
@@ -103,6 +106,21 @@ def reconstruct_latent_preprocess_sdf_gt(sdf_gt, clamp_dist, device='cuda', verb
         sdf_gt[sdf_idx] = sdf.to(device)
     return sdf_gt
 
+def project_latent(latent, latent_norm):
+    if isinstance(latent_norm, (list, tuple)):
+        if len(latent_norm) != 2:
+            raise ValueError('latent_norm must be a single value or a tuple/list of two values')
+        min_, max_ = latent_norm
+    elif isinstance(latent_norm, (int, float)):
+        min_ = max_ = latent_norm
+    else:
+        raise ValueError('latent_norm must be a single value or a tuple/list of two values')
+
+    with torch.no_grad():
+        norm = latent.norm(p=2)
+        norm_clipped = norm.clamp(min=min_, max=max_)
+        latent *= (norm_clipped / (norm + 1e-8))
+
 def reconstruct_latent(
     decoders,
     num_iterations,
@@ -131,6 +149,7 @@ def reconstruct_latent(
     n_steps_sample_ramp=None, #200,
     difficulty_weight=None,
     pts_surface=None,
+    latent_norm=None,
     device='cuda'
 ):
     
@@ -365,6 +384,12 @@ def reconstruct_latent(
         elif optimizer_name == 'lbfgs':
             print('LBFGS step:', step)
             optimizer.step(step_)
+        
+        # check if want to project onto hypersphere
+        if latent_norm is not None:
+            if verbose is True:
+                print(f'Projecting latent onto hypersphere of norm in range: {latent_norm}')
+            project_latent(latent, latent_norm)
 
         # Print progress/loss as appropriate
         if step % 50 == 0:
@@ -463,6 +488,7 @@ def reconstruct_mesh(
     return_timing=False,
     device='cuda',
     recon_grid_origin=1.0,
+    latent_norm=None,
 ):
     """
     Reconstructs mesh at path using decoders. 
@@ -518,7 +544,15 @@ def reconstruct_mesh(
         )
 
         if objects_per_decoder[decoder_to_scale] > 1:
-            mean_mesh = mean_mesh[mesh_to_scale]
+            print(f'Mean mesh is idx: {mesh_to_scale}')
+            # Support multi-surface mean mesh creation
+            if isinstance(mesh_to_scale, (list, tuple)):
+                print(f'Combining mean meshes for multi-surface registration: {mesh_to_scale}')
+                # Combine multiple mean meshes for registration
+                mean_mesh = combine_meshes(mean_mesh, mesh_to_scale)
+            else:
+                # Single mesh selection (original behavior)
+                mean_mesh = mean_mesh[mesh_to_scale]
 
         if mean_mesh is None:
             # Mean mesh is None if the zero latent vector is not well defined/learned
@@ -646,6 +680,7 @@ def reconstruct_mesh(
         'max_n_samples': max_n_samples_latent_recon, 
         'n_steps_sample_ramp': n_steps_sample_ramp_latent_recon,
         'device': device,
+        'latent_norm': latent_norm,
     }
 
 
