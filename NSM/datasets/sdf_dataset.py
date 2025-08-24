@@ -410,6 +410,37 @@ def read_meshes_get_sampled_pts(
 ):
     """
     Function to read in and sample points from multiple meshes.
+    
+    Args:
+        paths (list): List of paths to meshes
+        mean (list, optional): Mean to apply for random sample(s). Defaults to [0,0,0].
+        sigma (list, optional): Standard deviation/scale to apply for random sample(s). Defaults to [1, 1].
+        n_pts (list, optional): Number of points to sample per mesh. Defaults to [200000, 200000].
+        rand_function (str, optional): Distribution to sample from. Defaults to 'normal'. Also supports 'laplace'.
+        center_pts (bool, optional): Whether to center the points. Defaults to True.
+        norm_pts (bool, optional): Whether to normalize the points. Defaults to False.
+        scale_method (str, optional): Method to scale the points. Defaults to 'max_rad'.
+        get_random (bool, optional): Whether to sample random points. Defaults to True.
+        register_to_mean_first (bool, optional): Whether to register meshes to mean mesh first. Defaults to False.
+        mean_mesh (vtkPolyData or mskt.mesh.Mesh, optional): Mean mesh to register to. Defaults to None.
+        fix_mesh (bool, optional): Whether to fix meshes (using meshfix). Defaults to True.
+        include_surf_in_pts (bool, optional): Whether to include surface points in random points. Defaults to False.
+        scale_all_meshes (bool, optional): Whether to scale all meshes together. Defaults to True.
+        center_all_meshes (bool, optional): Whether to center all meshes together. Defaults to False.
+        mesh_to_scale (int or list, optional): Index(es) of mesh(es) to use for registration and scaling. 
+            If int, uses single mesh. If list, combines multiple meshes for registration. Defaults to 0.
+        verbose (bool, optional): Whether to print verbose output. Defaults to False.
+        icp_transform (vtk.vtkTransform, optional): Pre-computed ICP transform. Defaults to None.
+        uniform_pts_buffer (float, optional): Buffer for uniform point sampling. Defaults to 0.0.
+        
+    Returns:
+        dict: Dictionary containing processed mesh data, points, SDFs, and transforms
+        
+    Notes:
+        - When mesh_to_scale is a list (e.g., [0, 1]), multiple surfaces are combined
+          using VTK's vtkAppendPolyData for joint registration (e.g., medial + lateral menisci)
+        - The same ICP transform is applied to all meshes regardless of registration method
+        - Scaling and centering can be based on single or multiple reference surfaces
     """
     tic = time.time()
     list_deprecated = ['return_scale', 'return_center', 'return_orig_pts', 'return_orig_mesh', 'return_new_mesh']
@@ -470,7 +501,17 @@ def read_meshes_get_sampled_pts(
             raise ValueError('Must provide mean mesh to register to')
 
         if icp_transform is None:
-            icp_transform = orig_meshes[mesh_to_scale].rigidly_register(
+            # Support multiple surface registration
+            if isinstance(mesh_to_scale, (list, tuple)):
+                print(f'Registering to multiple surfaces: {mesh_to_scale}')
+                # Combine multiple meshes for registration
+                combined_mesh = combine_meshes(orig_meshes, mesh_to_scale)
+                registration_mesh = Mesh(combined_mesh)
+            else:
+                # Single mesh registration (original behavior)
+                registration_mesh = orig_meshes[mesh_to_scale]
+            
+            icp_transform = registration_mesh.rigidly_register(
                 other_mesh=mean_mesh,
                 as_source=True,
                 apply_transform_to_mesh=False,
@@ -502,7 +543,7 @@ def read_meshes_get_sampled_pts(
     if (center_pts is True) or (norm_pts is True):
         print('Scaling and centering meshes')
         if scale_all_meshes is True:
-            if None in new_pts:
+            if any(item is None for item in new_pts):
                 new_pts_ = [x for x in new_pts if x is not None]
                 pts_ = np.concatenate(new_pts_, axis=0)
             else:
@@ -513,13 +554,24 @@ def read_meshes_get_sampled_pts(
             else:
                 # set specific points to center becuase they are not the same
                 # for centering as they are for scaling (pts_)
-                pts_center = new_pts[mesh_to_scale]
+                if isinstance(mesh_to_scale, (list, tuple)):
+                    # Combine points from multiple meshes for centering
+                    pts_center_list = [new_pts[idx] for idx in mesh_to_scale if new_pts[idx] is not None]
+                    pts_center = np.concatenate(pts_center_list, axis=0) if pts_center_list else None
+                else:
+                    pts_center = new_pts[mesh_to_scale]
         else:
-            pts_ = new_pts[mesh_to_scale]
+            if isinstance(mesh_to_scale, (list, tuple)):
+                # Combine points from multiple meshes for scaling
+                pts_list = [new_pts[idx] for idx in mesh_to_scale if new_pts[idx] is not None]
+                pts_ = np.concatenate(pts_list, axis=0) if pts_list else new_pts[0]
+            else:
+                pts_ = new_pts[mesh_to_scale]
+            
             if center_all_meshes is True:
                 # set specific points to center because scale/center are not on
                 # the same data
-                if None in new_pts:
+                if any(item is None for item in new_pts):
                     new_pts_ = [x for x in new_pts if x is not None]
                     pts_center = np.concatenate(new_pts_, axis=0)
                 else:
@@ -1237,8 +1289,13 @@ class SDFSamples(torch.utils.data.Dataset):
             if isinstance(self.list_mesh_paths[0], (str, Mesh)):
                 mesh = self.list_mesh_paths[self.reference_mesh]
             elif isinstance(self.list_mesh_paths[0], (list, tuple)):
-                
-                mesh = self.list_mesh_paths[self.reference_mesh][self.mesh_to_scale]
+                # Support multi-surface reference mesh creation
+                if isinstance(self.mesh_to_scale, (list, tuple)):
+                    # When mesh_to_scale is a list, create reference mesh by combining multiple surfaces
+                    meshes = [Mesh(self.list_mesh_paths[self.reference_mesh][idx]) for idx in self.mesh_to_scale]
+                    self.reference_mesh = combine_meshes(meshes, list(range(len(meshes))))
+                else:
+                    mesh = self.list_mesh_paths[self.reference_mesh][self.mesh_to_scale]
             else:
                 raise TypeError('provided list_meshes wrong type')
             self.reference_mesh = Mesh(mesh)
@@ -1446,6 +1503,27 @@ class SDFSamples(torch.utils.data.Dataset):
         return data_, idx
     
 class MultiSurfaceSDFSamples(SDFSamples):
+    """
+    Dataset class for sampling SDFs from multiple mesh surfaces with support for
+    multi-surface rigid registration.
+    
+    Extends SDFSamples to handle multiple anatomical surfaces simultaneously,
+    such as bone + cartilage or medial + lateral menisci.
+    
+    Args:
+        mesh_to_scale (int or list): Index(es) of mesh(es) to use for registration and scaling.
+            - If int: Uses single mesh for registration (original behavior)
+            - If list: Combines multiple meshes for joint registration
+            Example: mesh_to_scale=[0, 1] for medial + lateral menisci registration
+        
+        Other args: Same as SDFSamples parent class
+    
+    Notes:
+        - When mesh_to_scale is a list, meshes are combined using VTK's vtkAppendPolyData
+        - Joint registration improves alignment when multiple related surfaces should
+          be considered together rather than individually
+        - All other functionality (scaling, centering, caching) remains the same
+    """
     def __init__(
         self,
         list_mesh_paths,
@@ -1995,3 +2073,33 @@ class MultiSurfaceSDFSamples(SDFSamples):
                 data_['whole_load_time'] = toc_whole_load - tic_whole_load
         
         return data_, idx
+
+def combine_meshes(meshes, mesh_indices):
+    """
+    Combine multiple meshes into a single mesh using Mesh addition operator.
+    
+    Args:
+        meshes (list): List of Mesh objects
+        mesh_indices (list or int): Indices of meshes to combine
+    
+    Returns:
+        Mesh: Combined mesh object
+    
+    Notes:
+        Since Mesh objects support the + operator, we can simply add them together
+        to combine multiple surfaces into a single mesh for registration.
+    """
+    if isinstance(mesh_indices, int):
+        return meshes[mesh_indices]
+    
+    if len(mesh_indices) == 1:
+        return meshes[mesh_indices[0]]
+    
+    # Start with the first mesh and add subsequent meshes
+    combined_mesh = meshes[mesh_indices[0]]
+    
+    for idx in mesh_indices[1:]:
+        if meshes[idx] is not None:
+            combined_mesh = combined_mesh + meshes[idx]
+    
+    return combined_mesh
