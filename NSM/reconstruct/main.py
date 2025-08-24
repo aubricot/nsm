@@ -219,15 +219,8 @@ def reconstruct_latent(
                 adjust_lr_every=adjust_lr_every
             )
 
-        def step_():
-            global recon_loss_
-            global latent_loss_
-            global loss_
-
-            recon_loss_ = 0
-
-            optimizer.zero_grad()
-
+        def compute_loss():
+            """Compute loss for current latent vector - used by both Adam and LBFGS"""
             if n_samples_init is not None:
                 n_samples_ = n_samples_init + int((max_n_samples - n_samples_init) * min(1.0, (step / n_steps_sample_ramp)))
                 if verbose is True:
@@ -281,20 +274,12 @@ def reconstruct_latent(
                 xyz_input = xyz
                 sdf_gt_ = sdf_gt
             
-            # if n_samples_init is not None:
-            #     # if n_samples_init is not None, then we are ramping up the number of samples
-            #     # so we need to update the latent_input
-            #     latent_input_ = latent.expand(n_samples_, -1)
-            # else:
-            #     latent_input_ = latent_input
-
             latent_input_ = latent.expand(n_samples_, -1)
             
-                
             # concat latent and xyz that will be inputted into decoder. 
             inputs = torch.cat([latent_input_, xyz_input], dim=1)
 
-            #TODO: potentially store each decoder's loss and return it to track in wandb?
+            recon_loss = 0
 
             # Iterate over the decoders (if there are multiple)
             for decoder_idx, decoder in enumerate(decoders):
@@ -360,30 +345,40 @@ def reconstruct_latent(
                     # send gradient from each batch of SDF values to latent
                     _loss_ = torch.mean(_loss_)
                     _loss_.backward()
-                    # update the global loss
-                    recon_loss_ += _loss_
+                    # update the local loss
+                    recon_loss += _loss_
 
                     current_pt_idx += current_batch_size
             
             # Compute latent loss - used to constrain new predictions to be close to zero (mean)
             # penalizing "abnormal" shapes
             if l2reg is True:
-                latent_loss_ = latent_reg_weight * torch.mean(latent ** 2)
-                latent_loss_.backward()
+                latent_loss = latent_reg_weight * torch.mean(latent ** 2)
+                latent_loss.backward()
             else:
-                latent_loss_ = 0        
+                latent_loss = 0        
             
-            loss_ = recon_loss_ + latent_loss_
+            total_loss = recon_loss + latent_loss
             
-            return loss_
+            return total_loss, recon_loss, latent_loss
+
+        def step_closure():
+            """LBFGS closure - just computes loss and gradients"""
+            optimizer.zero_grad()
+            total_loss, _, _ = compute_loss()
+            return total_loss
         
-        # Run the step_ (defined above) and the appropriate optimizer
+        # Run the appropriate optimizer step
         if optimizer_name == 'adam':
-            step_()
+            optimizer.zero_grad()
+            loss_, recon_loss_, latent_loss_ = compute_loss()
             optimizer.step()
         elif optimizer_name == 'lbfgs':
             print('LBFGS step:', step)
-            optimizer.step(step_)
+            loss_ = optimizer.step(step_closure)
+            # Compute final losses for tracking (without gradients)
+            with torch.no_grad():
+                _, recon_loss_, latent_loss_ = compute_loss()
         
         # check if want to project onto hypersphere
         if latent_norm is not None:
