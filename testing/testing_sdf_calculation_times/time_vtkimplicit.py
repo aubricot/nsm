@@ -11,23 +11,31 @@ MEAN = (0, 0, 0)
 # SIGMA = 0.0025 ** 0.5
 # SIGMA = 0.00025
 # SIGMA = 1.0 #0.0025 ** 0.5 * 45
-SIGMA = 1/45
+SIGMA = 1 / 45
 NORM = True
 N_REPEATS = 4
 
 rand_gen = np.random.default_rng().multivariate_normal
-COV = np.identity(len(MEAN)) * SIGMA ** 2 #**2
+COV = np.identity(len(MEAN)) * SIGMA**2  # **2
 
-mesh = mskt.mesh.Mesh('/dataNAS/people/aagatti/projects/OAI_Segmentation/oai_predictions_april_2023/2d_models/00_month/meshes_July_5_2023/9569243/RIGHT_femur__fixed_July_5_2023.vtk')
+mesh = mskt.mesh.Mesh(
+    "/dataNAS/people/aagatti/projects/OAI_Segmentation/oai_predictions_april_2023/2d_models/00_month/meshes_July_5_2023/9569243/RIGHT_femur__fixed_July_5_2023.vtk"
+)
 
 pts = mesh.point_coords
 
-if NORM: 
+if NORM:
     pts -= np.mean(pts, axis=0)
     pts = pts / np.max(np.linalg.norm(pts, axis=1))
     mesh.point_coords = pts
 
-pts = np.concatenate([pts,] * N_REPEATS, axis=0)
+pts = np.concatenate(
+    [
+        pts,
+    ]
+    * N_REPEATS,
+    axis=0,
+)
 
 print(np.min(pts, axis=0))
 print(np.max(pts, axis=0))
@@ -57,7 +65,7 @@ implicit_distance.FunctionValue(vtk_pts, sdfs)
 sdfs = vtk_to_numpy(sdfs)
 
 toc = time.time()
-print(toc-tic)
+print(toc - tic)
 
 print(np.mean(sdfs), np.std(sdfs), np.min(sdfs), np.max(sdfs))
 print(np.mean(noise), np.std(noise), np.min(noise), np.max(noise))
