@@ -9,6 +9,7 @@ from NSM.utils import (
     get_checkpoints,
     clear_gpu_cache,
 )
+from NSM.losses import eikonal_loss
 from NSM.reconstruct import (
     get_mean_errors,
     compare_cart_thickness,
@@ -263,6 +264,7 @@ def train_epoch(
     step_losses = 0
     step_l1_loss = 0
     step_code_reg_loss = 0
+    step_eikonal_loss = 0
     step_l1_losses = [0.0 for _ in range(n_surfaces)]
     step_mean_vec_length = 0
     step_std_vec_length = 0
@@ -330,6 +332,7 @@ def train_epoch(
         batch_l1_loss = 0.0
         batch_l1_losses = [0.0 for _ in range(n_surfaces)]
         batch_code_reg_loss = 0.0
+        batch_eikonal_loss = 0.0
 
         optimizer.zero_grad()
 
@@ -469,6 +472,18 @@ def train_epoch(
                 batch_l1_losses[l1_idx] += l1_loss_.sum().item()
             chunk_loss = l1_loss
 
+            # Add eikonal loss if enabled
+            eikonal_loss_value = 0
+            if config.get("eikonal_weight", 0) > 0:
+                # Recompute SDF with gradients for eikonal loss
+                xyz_grad = xyz[split_idx].detach().requires_grad_(True)
+                inputs_grad = torch.cat([batch_vecs, xyz_grad], dim=1)
+                pred_sdf_grad = model(inputs_grad, epoch=epoch)
+                eik_loss = eikonal_loss(pred_sdf_grad, xyz_grad, reduction="mean")
+                eikonal_loss_value = eik_loss.item()
+                batch_eikonal_loss += eikonal_loss_value
+                chunk_loss = chunk_loss + config["eikonal_weight"] * eik_loss
+
             if config["code_regularization"] is True:
                 if "variational" in config and config["variational"] is True:
                     kld = torch.mean(
@@ -518,6 +533,7 @@ def train_epoch(
         step_losses += batch_loss
         step_l1_loss += batch_l1_loss
         step_code_reg_loss += batch_code_reg_loss
+        step_eikonal_loss += batch_eikonal_loss
         for l1_idx, l1_loss_ in enumerate(batch_l1_losses):
             step_l1_losses[l1_idx] += l1_loss_  # l1_loss_
 
@@ -540,6 +556,7 @@ def train_epoch(
     save_loss = step_losses / len(data_loader)
     save_l1_loss = step_l1_loss / len(data_loader)
     save_code_reg_loss = step_code_reg_loss / len(data_loader)
+    save_eikonal_loss = step_eikonal_loss / len(data_loader)
     save_l1_losses = [l1_loss_ / len(data_loader) for l1_loss_ in step_l1_losses]
     save_mean_vec_length = step_mean_vec_length / len(data_loader)
     save_std_vec_length = step_std_vec_length / len(data_loader)
@@ -552,6 +569,8 @@ def train_epoch(
     print("save loss: ", save_loss)
     print("\t save l1 loss: ", save_l1_loss)
     print("\t save code loss: ", save_code_reg_loss)
+    if config.get("eikonal_weight", 0) > 0:
+        print(f"\t save eikonal loss: {save_eikonal_loss:.6f}")
     print("\t save l1 losses: ", save_l1_losses)
 
     log_dict = {
@@ -566,6 +585,8 @@ def train_epoch(
         "mean_vec_length": save_mean_vec_length,
         "std_vec_length": save_std_vec_length,
     }
+    if config.get("eikonal_weight", 0) > 0:
+        log_dict["eikonal_loss"] = save_eikonal_loss
     for l1_idx, l1_loss_ in enumerate(save_l1_losses):
         log_dict["l1_loss_{}".format(l1_idx)] = l1_loss_
 
