@@ -47,6 +47,8 @@ config = {
     # Loss function related parameters
     "enforce_minmax": True,
     "clamp_dist": 0.1,
+    # Eikonal loss parameters (for enforcing ||∇f|| = 1 constraint)
+    "eikonal_weight": 0.0,  # Weight for eikonal loss (0 to disable, typically 0.1)
     "sample_difficulty_weight": None,  # curriculum deepsdf equation 6
     "sample_difficulty_cooldown": None,
     "sample_difficulty_weight_schedule": "linear",  # 'linear', 'exponential', 'exponential_plateau', 'constant'
