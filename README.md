@@ -51,6 +51,44 @@ make install-dev
 
 # Usage
 
+## Logging
+
+NSM uses Python's built-in `logging` module for debugging and monitoring. To enable logging output in your scripts:
+
+```python
+import logging
+
+# Basic logging setup (adjust level as needed)
+logging.basicConfig(
+    level=logging.INFO,  # or DEBUG for more verbose output
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+# For more detailed output from specific modules
+logging.getLogger('NSM.reconstruct.recon_evaluation').setLevel(logging.DEBUG)
+```
+
+### Logging Levels
+- **DEBUG**: Detailed information for debugging (mesh processing details, loss values)
+- **INFO**: General information about process flow  
+- **WARNING**: Potential issues (missing meshes, NaN values)
+- **ERROR**: Serious errors that may cause failures
+
+### Example with File Output
+```python
+import logging
+
+# Configure logging to both console and file
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('nsm_processing.log'),
+        logging.StreamHandler()  # Console output
+    ]
+)
+```
+
 ## Model Loading
 
 NSM provides a convenient model loader that simplifies loading pre-trained Neural Shape Models. For **real trained models**, you'll typically have:
@@ -183,6 +221,10 @@ API documentation is planned for future development. Consider using `pdoc` for a
 # pip install pdoc
 # pdoc --html --output-dir docs NSM
 ```
+
+## TODO
+
+- [ ] **Add logging throughout the codebase**: Extend logging support to all major modules (training, model loading, mesh processing, etc.) following the pattern established in `NSM.reconstruct.recon_evaluation`
 
 
 # License
