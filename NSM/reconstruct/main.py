@@ -9,6 +9,7 @@ from .predictive_validation_class import Regress
 from NSM.datasets import read_mesh_get_sampled_pts, read_meshes_get_sampled_pts
 from NSM.datasets.sdf_dataset import combine_meshes
 from NSM.mesh import create_mesh
+from NSM.losses import eikonal_loss
 
 import numpy as np
 import sys
@@ -26,6 +27,139 @@ try:
 except:
     print("Error importing `sinkhorn` from NSM.dependencies")
     __emd__ = False
+
+
+def _process_meshes_for_wandb(meshes, mesh_prefix, max_points_3d, log_faces, verbose):
+    """
+    Helper function to process a list of meshes for wandb logging.
+    
+    Args:
+        meshes (list): List of mesh objects to process
+        mesh_prefix (str): Prefix for wandb keys (e.g., "recon_mesh", "orig_mesh")
+        max_points_3d (int): Maximum number of points to log (subsampled if exceeded)
+        log_faces (bool): Whether to include mesh faces in 3D visualization if available
+        verbose (bool): Whether to print processing details
+    
+    Returns:
+        dict: Dictionary with wandb-ready mesh data
+    """
+    mesh_data = {}
+    
+    for i, mesh in enumerate(meshes):
+        if mesh is not None and hasattr(mesh, 'point_coords'):
+            points = mesh.point_coords
+            
+            # Subsample if too many points
+            if len(points) > max_points_3d:
+                if verbose:
+                    print(f"Subsampling {mesh_prefix}_{i} from {len(points)} to {max_points_3d} points")
+                indices = np.random.choice(len(points), max_points_3d, replace=False)
+                points = points[indices]
+            
+            # Create 3D object with or without faces
+            if log_faces and hasattr(mesh, 'faces') and mesh.faces is not None:
+                try:
+                    mesh_data[f"{mesh_prefix}_{i}"] = wandb.Object3D({
+                        "type": "lidar/beta",
+                        "points": points,
+                        "faces": mesh.faces
+                    })
+                except Exception as e:
+                    if verbose:
+                        print(f"Failed to log faces for {mesh_prefix}_{i}, logging points only: {e}")
+                    mesh_data[f"{mesh_prefix}_{i}"] = wandb.Object3D(points)
+            else:
+                mesh_data[f"{mesh_prefix}_{i}"] = wandb.Object3D(points)
+            
+            # Log mesh statistics
+            mesh_data[f"{mesh_prefix}_{i}_n_points"] = len(mesh.point_coords)
+            if hasattr(mesh, 'faces') and mesh.faces is not None:
+                mesh_data[f"{mesh_prefix}_{i}_n_faces"] = len(mesh.faces)
+    
+    return mesh_data
+
+
+def prepare_results_for_wandb(result, max_points_3d=10000, log_faces=True, verbose=False):
+    """
+    Prepare reconstruction results for wandb logging with 3D point cloud visualization and robust JSON serialization.
+    
+    Args:
+        result (dict): Dictionary containing reconstruction results
+        max_points_3d (int): Maximum number of points to log for 3D visualization (subsampled if exceeded)
+        log_faces (bool): Whether to include mesh faces in 3D visualization if available
+        verbose (bool): Whether to print preparation details
+    
+    Returns:
+        dict: Dictionary ready for wandb logging (JSON serializable + 3D objects)
+    """
+    if verbose:
+        print("Preparing results for wandb logging...")
+    
+    # Create a copy to avoid modifying the original
+    result_wandb = copy.copy(result)
+    
+    # Process reconstructed meshes
+    if "mesh" in result_wandb and result_wandb["mesh"] is not None:
+        recon_mesh_data = _process_meshes_for_wandb(
+            result_wandb["mesh"], "recon_mesh", max_points_3d, log_faces, verbose
+        )
+        result_wandb.update(recon_mesh_data)
+    
+    # Process original meshes
+    if "orig_mesh" in result_wandb and result_wandb["orig_mesh"] is not None:
+        orig_mesh_data = _process_meshes_for_wandb(
+            result_wandb["orig_mesh"], "orig_mesh", max_points_3d, log_faces, verbose
+        )
+        result_wandb.update(orig_mesh_data)
+    
+    # Robust JSON serialization filtering
+    keys_to_delete = []
+    
+    for key, value in result_wandb.items():
+        if value is None:
+            continue  # None is JSON serializable
+        elif isinstance(value, (int, float, str, bool, list, dict, tuple)):
+            continue  # Basic JSON types + tuple
+        elif isinstance(value, (np.integer, np.floating)):
+            result_wandb[key] = float(value)  # Convert numpy scalars
+            continue
+        elif isinstance(value, np.ndarray):
+            if value.size <= 10:  # Only log small arrays
+                result_wandb[key] = value.tolist()
+                continue
+            else:
+                if verbose:
+                    print(f"Removing large numpy array '{key}' with size {value.size}")
+                keys_to_delete.append(key)
+        elif isinstance(value, torch.Tensor):
+            if value.numel() <= 10:  # Only log small tensors
+                result_wandb[key] = value.detach().cpu().numpy().tolist()
+                continue
+            else:
+                if verbose:
+                    print(f"Removing large tensor '{key}' with {value.numel()} elements")
+                keys_to_delete.append(key)
+        elif hasattr(value, '__class__') and 'wandb' in str(type(value)):
+            continue  # Keep wandb objects (like Object3D)
+        else:
+            if verbose:
+                print(f"Removing non-serializable object '{key}' of type {type(value)}")
+            keys_to_delete.append(key)
+    
+    # Delete non-serializable items
+    for key in keys_to_delete:
+        del result_wandb[key]
+    
+    # Delete original mesh objects (but keep the 3D point clouds we created)
+    if "mesh" in result_wandb:
+        del result_wandb["mesh"]
+    if "orig_mesh" in result_wandb:
+        del result_wandb["orig_mesh"]
+    
+    if verbose:
+        print(f"Prepared {len(result_wandb)} items for wandb logging")
+    
+    return result_wandb
 
 
 def reconstruct_latent_sdf_gt_type_check(sdf_gt, verbose=False):
@@ -88,7 +222,7 @@ def reconstruct_latent_get_lr_update_freq(n_lr_updates, num_iterations):
     if (n_lr_updates == 0) or (n_lr_updates is None):
         adjust_lr_every = num_iterations + 1
     else:
-        adjust_lr_every = num_iterations // n_lr_updates
+        adjust_lr_every = max(1, num_iterations // n_lr_updates)  # Ensure it's never 0
 
     return adjust_lr_every
 
@@ -120,7 +254,7 @@ def project_latent(latent, latent_norm):
     with torch.no_grad():
         norm = latent.norm(p=2)
         norm_clipped = norm.clamp(min=min_, max=max_)
-        latent *= norm_clipped / (norm + 1e-8)
+        latent.data.mul_(norm_clipped / (norm + 1e-8))
 
 
 def reconstruct_latent(
@@ -132,7 +266,6 @@ def reconstruct_latent(
     loss_type="l1",
     lr=5e-4,
     loss_weight=1.0,
-    max_batch_size=30000,
     l2reg=False,
     latent_init_std=0.01,
     latent_init_mean=0.0,
@@ -153,8 +286,15 @@ def reconstruct_latent(
     pts_surface=None,
     latent_norm=None,
     device="cuda",
+    eikonal_weight=0.0,  # Weight for eikonal loss (0 to disable)
+    **kwargs,
 ):
 
+    # Check for deprecated parameters
+    if "max_batch_size" in kwargs:
+        print("Warning: max_batch_size is deprecated and will be removed in future versions. "
+              "Batch processing has been simplified and now processes all data at once for better performance.")
+    
     sdf_gt = reconstruct_latent_sdf_gt_type_check(sdf_gt, verbose=verbose)
     pts_surface = reconstruct_latent_pts_surface_type_check(
         pts_surface, verbose=verbose, device=device
@@ -172,7 +312,8 @@ def reconstruct_latent(
         n_samples = xyz.shape[0]
 
     if (max_n_samples is not None) and (n_steps_sample_ramp is not None):
-        print("Ramping up number of samples")
+        if verbose is True:
+            print("Ramping up number of samples")
         n_samples_init = n_samples
     else:
         n_samples_init = None
@@ -192,11 +333,17 @@ def reconstruct_latent(
     if optimizer_name == "adam":
         optimizer = torch.optim.Adam([latent], lr=lr)
     elif optimizer_name == "lbfgs":
-        optimizer = torch.optim.LBFGS([latent])
+        optimizer = torch.optim.LBFGS([latent], 
+                                      lr=1.0,           # LBFGS typically uses lr=1.0
+                                      max_iter=100,     # More internal iterations per step  
+                                      history_size=100) # Larger history for better Hessian approx
 
     # Initialize loss
     if loss_type == "l1":
         loss_fn = torch.nn.L1Loss(reduction="none")
+    elif loss_type == "l1_log":
+        eps = 1e-8
+        loss_fn = lambda x, y: torch.log(torch.abs(x - y) + eps)
     elif loss_type == "l2":
         loss_fn = torch.nn.MSELoss(reduction="none")
 
@@ -215,7 +362,6 @@ def reconstruct_latent(
     xyz = xyz.to(device)
 
     for step in range(num_iterations):
-
         # update LR
         if optimizer_name == "adam":
             adjust_learning_rate(
@@ -225,6 +371,7 @@ def reconstruct_latent(
                 decreased_by=lr_update_factor,
                 adjust_lr_every=adjust_lr_every,
             )
+
 
         def compute_loss():
             """Compute loss for current latent vector - used by both Adam and LBFGS"""
@@ -296,129 +443,126 @@ def reconstruct_latent(
 
             # Iterate over the decoders (if there are multiple)
             for decoder_idx, decoder in enumerate(decoders):
-                current_pt_idx = 0
+                # Single forward pass - no batching loop needed
+                pred_sdf = decoder(inputs)
+                
+                # initialize loss as zeros
+                _loss_ = torch.zeros(inputs.shape[0], device=torch.device(device))
 
-                # Iterate over points in xyz_input
-                while current_pt_idx < inputs.shape[0]:
-                    # Get batch size & predict sdf
-                    current_batch_size = min(max_batch_size, inputs.shape[0] - current_pt_idx)
-                    pred_sdf = decoder(
-                        inputs[current_pt_idx : current_pt_idx + current_batch_size, ...]
+                # Apply clamping distance - to ignore points that are too far away
+                if clamp_dist is not None:
+                    pred_sdf = torch.clamp(pred_sdf, -clamp_dist, clamp_dist)
+
+                # Compute loss
+                if pred_sdf.shape[1] == 1:
+                    # if only one surface - then just loss_fn (l1/l2) between pred_sdf and sdf_gt
+                    if difficulty_weight is not None:
+                        raise NotImplementedError
+                    _loss_ += (
+                        loss_fn(
+                            pred_sdf.squeeze(),
+                            sdf_gt_[decoder_idx].squeeze(),
+                        )
+                        * loss_weight
                     )
 
-                    # initialize loss as zeros
-                    _loss_ = torch.zeros(current_batch_size, device=torch.device(device))
+                else:
+                    # if multiple surfaces - then compute loss for each surface and weight them
+                    for sdf_idx in range(pred_sdf.shape[1]):
+                        if sdf_idx >= len(sdf_gt_):
+                            # might only have 1 surface (e.g., bone) and trying to reconstruct both
+                            # (e.g., bone and cartilage) - in this case, break
+                            # TODO: this is a bit of a hack, should be handled better
+                            # right now it assumes the first surface is the bone / only of interest
+                            # but we might want to reconstruct bone from cartilage (maybe?) or maybe we put
+                            # cartilage first? Or maybe we have multiple bones & cartilage?
+                            if verbose is True:
+                                print(
+                                    f"sdf_idx ({sdf_idx}) >= len(sdf_gt_) ({len(sdf_gt)})... exiting"
+                                )
+                            break
 
-                    # Apply clamping distance - to ignore points that are too far away
-                    if clamp_dist is not None:
-                        pred_sdf = torch.clamp(pred_sdf, -clamp_dist, clamp_dist)
+                        # if sdf_gt_[sdf_idx] is None, then skip this surface
+                        # in fitting latent
+                        if sdf_gt_[sdf_idx] is None:
+                            if verbose is True:
+                                print(f"sdf_gt_[sdf_idx] is None, skipping surface {sdf_idx}")
+                            continue
 
-                    # Compute loss
-                    if pred_sdf.shape[1] == 1:
-                        # if only one surface - then just loss_fn (l1/l2) between pred_sdf and sdf_gt
                         if difficulty_weight is not None:
-                            raise NotImplementedError
+                            error_sign = torch.sign(
+                                sdf_gt_[sdf_idx].squeeze()
+                                - pred_sdf[:, sdf_idx].squeeze()
+                            )
+                            sdf_gt_sign = torch.sign(
+                                sdf_gt_[sdf_idx].squeeze()
+                            )
+                            sample_weights = 1 + difficulty_weight * sdf_gt_sign * error_sign
+                        else:
+                            sample_weights = torch.ones_like(pred_sdf[:, sdf_idx].squeeze())
                         _loss_ += (
                             loss_fn(
-                                pred_sdf.squeeze(),
-                                sdf_gt_[decoder_idx][
-                                    current_pt_idx : current_pt_idx + current_batch_size, ...
-                                ].squeeze(),
+                                pred_sdf[:, sdf_idx].squeeze(),
+                                sdf_gt_[sdf_idx].squeeze(),
                             )
                             * loss_weight
+                            * sample_weights
                         )
 
-                    else:
-                        # if multiple surfaces - then compute loss for each surface and weight them
-                        for sdf_idx in range(pred_sdf.shape[1]):
-                            if sdf_idx >= len(sdf_gt_):
-                                # might only have 1 surface (e.g., bone) and trying to reconstruct both
-                                # (e.g., bone and cartilage) - in this case, break
-                                # TODO: this is a bit of a hack, should be handled better
-                                # right now it assumes the first surface is the bone / only of interest
-                                # but we might want to reconstruct bone from cartilage (maybe?) or maybe we put
-                                # cartilage first? Or maybe we have multiple bones & cartilage?
-                                if verbose is True:
-                                    print(
-                                        f"sdf_idx ({sdf_idx}) >= len(sdf_gt_) ({len(sdf_gt)})... exiting"
-                                    )
-                                break
+                        if verbose is True:
+                            print(f"loss_{sdf_idx} shape: ", _loss_.shape)
+                            print(f"loss_{sdf_idx} mean: ", _loss_.mean())
+                            print(f"loss_{sdf_idx} std: ", _loss_.std())
 
-                            # if sdf_gt_[sdf_idx] is None, then skip this surface
-                            # in fitting latent
-                            if sdf_gt_[sdf_idx] is None:
-                                if verbose is True:
-                                    print(f"sdf_gt_[sdf_idx] is None, skipping surface {sdf_idx}")
-                                continue
+                _loss_ = torch.mean(_loss_)
+                # update the local loss
+                recon_loss += _loss_
 
-                            if difficulty_weight is not None:
-                                error_sign = torch.sign(
-                                    sdf_gt_[sdf_idx][
-                                        current_pt_idx : current_pt_idx + current_batch_size, ...
-                                    ].squeeze()
-                                    - pred_sdf[:, sdf_idx].squeeze()
-                                )
-                                sdf_gt_sign = torch.sign(
-                                    sdf_gt_[sdf_idx][
-                                        current_pt_idx : current_pt_idx + current_batch_size, ...
-                                    ].squeeze()
-                                )
-                                sample_weights = 1 + difficulty_weight * sdf_gt_sign * error_sign
-                            else:
-                                sample_weights = torch.ones_like(pred_sdf[:, sdf_idx].squeeze())
-                            _loss_ += (
-                                loss_fn(
-                                    pred_sdf[:, sdf_idx].squeeze(),
-                                    sdf_gt_[sdf_idx][
-                                        current_pt_idx : current_pt_idx + current_batch_size, ...
-                                    ].squeeze(),
-                                )
-                                * loss_weight
-                                * sample_weights
-                            )
-
-                            if verbose is True:
-                                print(f"loss_{sdf_idx} shape: ", _loss_.shape)
-                                print(f"loss_{sdf_idx} mean: ", _loss_.mean())
-                                print(f"loss_{sdf_idx} std: ", _loss_.std())
-
-                    # send gradient from each batch of SDF values to latent
-                    _loss_ = torch.mean(_loss_)
-                    _loss_.backward()
-                    # update the local loss
-                    recon_loss += _loss_
-
-                    current_pt_idx += current_batch_size
+            # Compute eikonal loss - enforces ||∇f|| = 1 constraint for valid SDFs
+            eikonal_loss_value = 0
+            if eikonal_weight > 0:
+                # Need to recompute with gradients enabled for eikonal loss
+                xyz_input_grad = xyz_input.detach().requires_grad_(True)
+                latent_input_grad = latent.expand(n_samples_, -1)
+                inputs_grad = torch.cat([latent_input_grad, xyz_input_grad], dim=1)
+                
+                for decoder_idx, decoder in enumerate(decoders):
+                    pred_sdf_grad = decoder(inputs_grad)
+                    eik_loss = eikonal_loss(pred_sdf_grad, xyz_input_grad, reduction="mean")
+                    eikonal_loss_value += eik_loss
+                
+                # Average over decoders if multiple
+                if len(decoders) > 1:
+                    eikonal_loss_value = eikonal_loss_value / len(decoders)
 
             # Compute latent loss - used to constrain new predictions to be close to zero (mean)
             # penalizing "abnormal" shapes
             if l2reg is True:
                 latent_loss = latent_reg_weight * torch.mean(latent**2)
-                latent_loss.backward()
             else:
                 latent_loss = 0
 
-            total_loss = recon_loss + latent_loss
+            total_loss = recon_loss + latent_loss + eikonal_weight * eikonal_loss_value
 
-            return total_loss, recon_loss, latent_loss
+            return total_loss, recon_loss, latent_loss, eikonal_loss_value
 
         def step_closure():
             """LBFGS closure - just computes loss and gradients"""
             optimizer.zero_grad()
-            total_loss, _, _ = compute_loss()
+            total_loss, _, _, _ = compute_loss()
             return total_loss
 
         # Run the appropriate optimizer step
         if optimizer_name == "adam":
             optimizer.zero_grad()
-            loss_, recon_loss_, latent_loss_ = compute_loss()
+            loss_, recon_loss_, latent_loss_, eikonal_loss_ = compute_loss()
+            loss_.backward()  # Adam: explicitly call backward
             optimizer.step()
         elif optimizer_name == "lbfgs":
-            print("LBFGS step:", step)
-            loss_ = optimizer.step(step_closure)
+            loss_ = optimizer.step(step_closure)  # LBFGS handles backward internally
             # Compute final losses for tracking (without gradients)
             with torch.no_grad():
-                _, recon_loss_, latent_loss_ = compute_loss()
+                _, recon_loss_, latent_loss_, eikonal_loss_ = compute_loss()
 
         # check if want to project onto hypersphere
         if latent_norm is not None:
@@ -430,19 +574,24 @@ def reconstruct_latent(
         if step % 50 == 0:
             if verbose is True:
                 print("Step: ", step, "Loss: ", loss_.item())
+                print("\tRecon loss: ", recon_loss_.item())
+                if eikonal_weight > 0:
+                    eikonal_val = eikonal_loss_.item() if hasattr(eikonal_loss_, 'item') else float(eikonal_loss_)
+                    print(f"\tEikonal loss: {eikonal_val:.6f}")
                 print("\tLatent norm: ", latent.norm)
 
         # Log to wandb as appropriate
         if (log_wandb is True) and (step % log_wandb_step == 0):
-            wandb.log(
-                {
-                    "total_loss": loss_.item(),
-                    "l1_loss": loss_.item(),
-                    "recon_loss": recon_loss_.item(),
-                    "latent_loss": latent_loss_.item() if l2reg is True else np.nan,
-                    "latent_norm": latent.norm().item(),
-                }
-            )
+            log_dict = {
+                "total_loss": loss_.item(),
+                "l1_loss": loss_.item(),
+                "recon_loss": recon_loss_.item(),
+                "latent_loss": latent_loss_.item() if l2reg is True else np.nan,
+                "latent_norm": latent.norm().item(),
+            }
+            if eikonal_weight > 0:
+                log_dict["eikonal_loss"] = eikonal_loss_.item() if hasattr(eikonal_loss_, 'item') else float(eikonal_loss_)
+            wandb.log(log_dict)
 
         # Handle end of loop accounting of loss/latent based on convergence criteria
         if convergence == "overall_loss":
@@ -483,7 +632,7 @@ def reconstruct_mesh(
     num_iterations=1000,
     lr=5e-4,
     batch_size=32**3,
-    batch_size_latent_recon=3 * 10**4,
+    # batch_size_latent_recon=3 * 10**4,
     loss_weight=1.0,
     loss_type="l1",
     l2reg=False,
@@ -527,6 +676,7 @@ def reconstruct_mesh(
     device="cuda",
     recon_grid_origin=1.0,
     latent_norm=None,
+    **kwargs,
 ):
     """
     Reconstructs mesh at path using decoders.
@@ -538,6 +688,11 @@ def reconstruct_mesh(
         path1_mesh = decoder0_mesh1 OR decoder1_mesh0
         etc.
     """
+    
+    # warning batch_size_latent_recon is deprecated
+    if "batch_size_latent_recon" in kwargs:
+        print("Warning: batch_size_latent_recon is deprecated and will be removed in future versions. "
+              "Batch processing has been simplified and now processes all data at once for better performance.")
 
     # Check if path is a single mesh or a list of meshes & set multi_object flag
     if isinstance(path, str):
@@ -592,10 +747,12 @@ def reconstruct_mesh(
         )
 
         if objects_per_decoder[decoder_to_scale] > 1:
-            print(f"Mean mesh is idx: {mesh_to_scale}")
+            if verbose is True:
+                print(f"Mean mesh is idx: {mesh_to_scale}")
             # Support multi-surface mean mesh creation
             if isinstance(mesh_to_scale, (list, tuple)):
-                print(f"Combining mean meshes for multi-surface registration: {mesh_to_scale}")
+                if verbose is True:
+                    print(f"Combining mean meshes for multi-surface registration: {mesh_to_scale}")
                 # Combine multiple mean meshes for registration
                 mean_mesh = combine_meshes(mean_mesh, mesh_to_scale)
             else:
@@ -723,7 +880,7 @@ def reconstruct_mesh(
         "convergence": convergence,
         "convergence_patience": convergence_patience,
         "verbose": verbose,
-        "max_batch_size": batch_size_latent_recon,
+        # "max_batch_size" parameter removed - now handled automatically
         "optimizer_name": latent_optimizer_name,
         "n_samples": n_samples_latent_recon,
         "difficulty_weight": difficulty_weight_recon,
@@ -763,6 +920,7 @@ def reconstruct_mesh(
             objects=objects_per_decoder[decoder_idx],
             verbose=verbose,
             device=device,
+            batch_size=batch_size,
         )
         if objects_per_decoder[decoder_idx] > 1:
             # append sequentially so they match the order of meshes at "path"
@@ -799,6 +957,8 @@ def reconstruct_mesh(
         result["orig_mesh"] = result_["orig_mesh"]
 
         if calc_emd or calc_symmetric_chamfer or calc_assd:
+            print("length of meshes: ", len(meshes))
+            print("length of orig_mesh: ", len(result_["orig_mesh"]))
             result_recon_metrics = compute_recon_loss(
                 meshes=meshes,
                 orig_meshes=result_["orig_mesh"],
@@ -809,6 +969,7 @@ def reconstruct_mesh(
                 calc_assd=calc_assd,
                 calc_emd=calc_emd,
             )
+            print('finished computing recon loss')
             toc = time.time()
             time_calc_recon_loss = toc - tic
             if verbose is True:
@@ -830,11 +991,10 @@ def reconstruct_mesh(
             result["time_calc_recon_funcs"] = time_calc_recon_funcs
 
         if log_wandb is True:
-            # Do this before adding registration params that are not needed
-            # and might not be compatible (e.g., icp_transform)
-            result_wandb = copy.copy(result)
-            del result_wandb["mesh"]
+            # Prepare and log results to wandb with 3D point cloud visualization
+            result_wandb = prepare_results_for_wandb(result, verbose=verbose)
             wandb.log(result_wandb)
+            print('done wandb stuff')
 
         if return_registration_params:
             result["icp_transform"] = result_["icp_transform"]
