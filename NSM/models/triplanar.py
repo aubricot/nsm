@@ -211,6 +211,40 @@ class TriplanarDecoder(nn.Module):
             layer_split=None,
         )
 
+        # Sticky plane features cache for inference optimization
+        self._sticky_latent = None      # 1D CPU copy for comparison
+        self._sticky_feats = None       # (C,H,W) on current device
+        self.sticky_rtol = 1e-6
+        self.sticky_atol = 1e-7
+
+    def clear_sticky(self):
+        """Clear the sticky plane features cache."""
+        self._sticky_latent = None
+        self._sticky_feats = None
+
+    def _same_latent_as_sticky(self, z: torch.Tensor) -> bool:
+        """Check if the given latent matches the cached sticky latent."""
+        if self._sticky_latent is None:
+            return False
+        return torch.allclose(
+            z.detach().cpu(), self._sticky_latent,
+            rtol=self.sticky_rtol, atol=self.sticky_atol
+        )
+
+    @torch.no_grad()
+    def prime(self, latent: torch.Tensor, device: torch.device = None):
+        """
+        Precompute & store plane features for a single latent.
+        
+        Args:
+            latent: (D,) or (1,D) latent vector
+            device: target device for plane features (defaults to model device)
+        """
+        z = latent.squeeze(0) if latent.dim() == 2 else latent
+        feats = self.vae_decoder(z.unsqueeze(0)).squeeze(0)   # (C,H,W) on current device
+        self._sticky_latent = z.detach().cpu()
+        self._sticky_feats = feats.detach().to(device or next(self.parameters()).device)
+
     def forward_with_plane_features(self, plane_features, query):
         """
 
@@ -288,13 +322,23 @@ class TriplanarDecoder(nn.Module):
 
         return xy_new[None, :, None, :]
 
-    def forward(self, x, epoch=None, verbose=False):
-        if verbose is True:
+    def forward(self, x, epoch=None, verbose=False, sticky=False):
+        """
+        Forward pass through the triplanar decoder.
+        
+        Args:
+            x: Input tensor with latent codes and xyz coordinates
+            epoch: Current training epoch (for logging)
+            verbose: Whether to print debug information
+            sticky: If True, cache plane features for repeated inference with same latent.
+                   Requires a single unique latent per call. On latent mismatch,
+                   automatically clears old cache and stores new features.
+        """
+        if verbose:
             print("Triplanar.forward()")
-            print("Epoch: ", epoch)
+            print("Epoch:", epoch)
             print(f"Device: {x.device}")
             print(f"x shape: {x.shape}, dtype: {x.dtype}")
-            # if x is on cuda, print memory allocated and cached
             if x.device.type == "cuda":
                 print(f"Memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
                 print(f"Memory cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
@@ -302,34 +346,46 @@ class TriplanarDecoder(nn.Module):
         xyz = x[:, -3:]
         latent = x[:, :-3]
 
-        # get unique latent codes
         unique_latent, unique_indices = unique_consecutive(latent, 0, True)
-        # get plane features for each unique latent code
-        plane_features = self.vae_decoder(unique_latent)
+        num_unique = unique_latent.shape[0]
 
-        # ALTERNATE METHOD:
-        #    - pre-applocate array of zeros and fill it while
-        #    iterating over the data.
+        if sticky:
+            # enforce one-latent-per-call in sticky mode
+            if num_unique != 1:
+                raise ValueError("sticky=True requires a single unique latent per call.")
 
-        point_latents = []
-        # # # apply forward for data of each unique latent code
-        for idx in range(unique_latent.shape[0]):
-            # get plane features for each point
-            point_latents_ = self.forward_with_plane_features(
-                plane_features[idx, :, :, :], xyz[unique_indices == idx, :]
-            )
-            point_latents.append(point_latents_)
+            z = unique_latent[0]
 
-        point_latents = torch.cat(point_latents, dim=0)
+            # if latent changed: drop old sticky & compute new
+            if not self._same_latent_as_sticky(z):
+                self.clear_sticky()
+                with torch.no_grad():  # inference path
+                    feats = self.vae_decoder(z.unsqueeze(0)).squeeze(0)  # (C,H,W)
+                # store new sticky (keep on current device)
+                self._sticky_latent = z.detach().cpu()
+                self._sticky_feats = feats.detach()
 
-        if self.conv_pred_sdf is True:
-            low_freq_sdf = point_latents[:, :1]
-            point_latents = point_latents[:, 1:]
+            # reuse sticky features for all points in this batch
+            plane_feats_for_points = self.forward_with_plane_features(self._sticky_feats, xyz)
 
-        sdf_features = torch.cat([point_latents, xyz], dim=1)
+        else:
+            # original multi-latent path (no sticky behavior)
+            per_unique_feats = self.vae_decoder(unique_latent)  # (U,C,H,W)
+            pts_latents = []
+            for idx in range(num_unique):
+                feats = per_unique_feats[idx]
+                pts = xyz[unique_indices == idx, :]
+                pts_latents.append(self.forward_with_plane_features(feats, pts))
+            plane_feats_for_points = torch.cat(pts_latents, dim=0)
+
+        if self.conv_pred_sdf:
+            low_freq_sdf = plane_feats_for_points[:, :1]
+            plane_feats_for_points = plane_feats_for_points[:, 1:]
+
+        sdf_features = torch.cat([plane_feats_for_points, xyz], dim=1)
         sdf = self.sdf_decoder(sdf_features)
 
-        if self.conv_pred_sdf is True:
+        if self.conv_pred_sdf:
             sdf = sdf + low_freq_sdf
 
         return sdf
