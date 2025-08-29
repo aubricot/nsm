@@ -8,7 +8,7 @@ from .predictive_validation_class import Regress
 
 from NSM.datasets import read_mesh_get_sampled_pts, read_meshes_get_sampled_pts
 from NSM.datasets.sdf_dataset import combine_meshes
-from NSM.mesh import create_mesh
+from NSM.mesh import create_mesh_adaptive
 from NSM.losses import eikonal_loss
 
 import numpy as np
@@ -287,6 +287,13 @@ def reconstruct_latent(
     latent_norm=None,
     device="cuda",
     eikonal_weight=0.0,  # Weight for eikonal loss (0 to disable)
+    # Hybrid optimizer parameters
+    hybrid_optimizer=False,  # Whether to use Adam + LBFGS hybrid approach
+    adam_iterations=None,  # Number of Adam iterations (if None, uses num_iterations)
+    lbfgs_iterations=None,  # Number of LBFGS iterations (if None, no LBFGS phase)
+    lbfgs_lr=1.0,  # Learning rate for LBFGS phase
+    lbfgs_max_iter=20,  # Max iterations per LBFGS step
+    lbfgs_history_size=100,  # LBFGS history size
     **kwargs,
 ):
 
@@ -329,14 +336,36 @@ def reconstruct_latent(
     latent.requires_grad = True
     latent_input = latent.expand(n_samples, -1)
 
-    # Initialize optimizer
-    if optimizer_name == "adam":
-        optimizer = torch.optim.Adam([latent], lr=lr)
-    elif optimizer_name == "lbfgs":
-        optimizer = torch.optim.LBFGS([latent], 
-                                      lr=1.0,           # LBFGS typically uses lr=1.0
-                                      max_iter=100,     # More internal iterations per step  
-                                      history_size=100) # Larger history for better Hessian approx
+    # Initialize optimizer(s)
+    if hybrid_optimizer:
+        # Set default values if not specified
+        if adam_iterations is None:
+            adam_iterations = num_iterations
+        if lbfgs_iterations is None:
+            lbfgs_iterations = 0
+            
+        # Update total iterations to match the sum
+        total_iterations = adam_iterations + lbfgs_iterations
+        
+        # Initialize both optimizers
+        adam_optimizer = torch.optim.Adam([latent], lr=lr)
+        lbfgs_optimizer = torch.optim.LBFGS([latent], 
+                                           lr=lbfgs_lr,
+                                           max_iter=lbfgs_max_iter,
+                                           history_size=lbfgs_history_size)
+        
+        if verbose:
+            print(f"Hybrid optimizer: {adam_iterations} Adam iterations + {lbfgs_iterations} LBFGS iterations")
+            print(f"Total iterations: {total_iterations}")
+    else:
+        # Single optimizer mode
+        if optimizer_name == "adam":
+            optimizer = torch.optim.Adam([latent], lr=lr)
+        elif optimizer_name == "lbfgs":
+            optimizer = torch.optim.LBFGS([latent], 
+                                          lr=lr,           # LBFGS typically uses lr=1.0
+                                          max_iter=10,     # More internal iterations per step  
+                                          history_size=100) # Larger history for better Hessian approx
 
     # Initialize loss
     if loss_type == "l1":
@@ -361,16 +390,49 @@ def reconstruct_latent(
     # PASS XYZ TO GPU
     xyz = xyz.to(device)
 
-    for step in range(num_iterations):
-        # update LR
-        if optimizer_name == "adam":
-            adjust_learning_rate(
-                initial_lr=lr,
-                optimizer=optimizer,
-                iteration=step,
-                decreased_by=lr_update_factor,
-                adjust_lr_every=adjust_lr_every,
-            )
+    # Track whether we've switched to LBFGS in hybrid mode
+    switched_to_lbfgs = False
+    
+    # Determine actual number of iterations to run
+    if hybrid_optimizer:
+        actual_num_iterations = total_iterations
+    else:
+        actual_num_iterations = num_iterations
+    
+    for step in range(actual_num_iterations):
+        # Determine current optimizer and phase
+        if hybrid_optimizer:
+            current_optimizer_name = "adam" if step < adam_iterations else "lbfgs"
+            current_optimizer = adam_optimizer if step < adam_iterations else lbfgs_optimizer
+            
+            # Handle transition from Adam to LBFGS
+            if step == adam_iterations and not switched_to_lbfgs and lbfgs_iterations > 0:
+                switched_to_lbfgs = True
+                if verbose:
+                    print(f"Switching from Adam to LBFGS at step {step}")
+                    print(f"Current latent norm: {latent.norm().item():.6f}")
+        else:
+            current_optimizer_name = optimizer_name
+            current_optimizer = optimizer
+        
+        # update LR (only for Adam)
+        if current_optimizer_name == "adam":
+            if hybrid_optimizer:
+                adjust_learning_rate(
+                    initial_lr=lr,
+                    optimizer=current_optimizer,
+                    iteration=step,
+                    decreased_by=lr_update_factor,
+                    adjust_lr_every=adjust_lr_every,
+                )
+            else:
+                adjust_learning_rate(
+                    initial_lr=lr,
+                    optimizer=optimizer,
+                    iteration=step,
+                    decreased_by=lr_update_factor,
+                    adjust_lr_every=adjust_lr_every,
+                )
 
 
         def compute_loss():
@@ -547,25 +609,32 @@ def reconstruct_latent(
             return total_loss, recon_loss, latent_loss, eikonal_loss_value
 
         def step_closure():
-            """LBFGS closure - just computes loss and gradients"""
-            optimizer.zero_grad()
+            """LBFGS closure - computes loss and gradients, with optional latent projection"""
+            current_optimizer.zero_grad()
             total_loss, _, _, _ = compute_loss()
+            total_loss.backward()
+            
+            # Project latent during LBFGS internal iterations if norm constraint is specified
+            if current_optimizer_name == "lbfgs" and latent_norm is not None:
+                with torch.no_grad():
+                    project_latent(latent, latent_norm)
+            
             return total_loss
 
         # Run the appropriate optimizer step
-        if optimizer_name == "adam":
-            optimizer.zero_grad()
+        if current_optimizer_name == "adam":
+            current_optimizer.zero_grad()
             loss_, recon_loss_, latent_loss_, eikonal_loss_ = compute_loss()
             loss_.backward()  # Adam: explicitly call backward
-            optimizer.step()
-        elif optimizer_name == "lbfgs":
-            loss_ = optimizer.step(step_closure)  # LBFGS handles backward internally
+            current_optimizer.step()
+        elif current_optimizer_name == "lbfgs":
+            loss_ = current_optimizer.step(step_closure)  # LBFGS handles backward internally
             # Compute final losses for tracking (without gradients)
             with torch.no_grad():
                 _, recon_loss_, latent_loss_, eikonal_loss_ = compute_loss()
 
-        # check if want to project onto hypersphere
-        if latent_norm is not None:
+        # check if want to project onto hypersphere (skip for LBFGS since it's done in closure)
+        if latent_norm is not None and current_optimizer_name != "lbfgs":
             if verbose is True:
                 print(f"Projecting latent onto hypersphere of norm in range: {latent_norm}")
             project_latent(latent, latent_norm)
@@ -573,7 +642,8 @@ def reconstruct_latent(
         # Print progress/loss as appropriate
         if step % 50 == 0:
             if verbose is True:
-                print("Step: ", step, "Loss: ", loss_.item())
+                optimizer_info = f" ({current_optimizer_name})" if hybrid_optimizer else ""
+                print(f"Step: {step}{optimizer_info}, Loss: {loss_.item()}")
                 print("\tRecon loss: ", recon_loss_.item())
                 if eikonal_weight > 0:
                     eikonal_val = eikonal_loss_.item() if hasattr(eikonal_loss_, 'item') else float(eikonal_loss_)
@@ -676,6 +746,13 @@ def reconstruct_mesh(
     device="cuda",
     recon_grid_origin=1.0,
     latent_norm=None,
+    # Hybrid optimizer parameters
+    hybrid_optimizer=False,  # Whether to use Adam + LBFGS hybrid approach
+    adam_iterations=None,  # Number of Adam iterations (if None, uses num_iterations)
+    lbfgs_iterations=None,  # Number of LBFGS iterations (if None, no LBFGS phase)
+    lbfgs_lr=1.0,  # Learning rate for LBFGS phase
+    lbfgs_max_iter=20,  # Max iterations per LBFGS step
+    lbfgs_history_size=100,  # LBFGS history size
     **kwargs,
 ):
     """
@@ -736,7 +813,7 @@ def reconstruct_mesh(
         mean_latent = torch.zeros(1, latent_size)
         # create mean mesh, assume that using decoder_0 & mesh_0, but
         # technically this can be specified.
-        mean_mesh = create_mesh(
+        mean_mesh = create_mesh_adaptive(
             decoder=decoders[decoder_to_scale].to(device),
             latent_vector=mean_latent.to(device),
             n_pts_per_axis=n_pts_per_axis_mean_mesh,
@@ -889,6 +966,13 @@ def reconstruct_mesh(
         "n_steps_sample_ramp": n_steps_sample_ramp_latent_recon,
         "device": device,
         "latent_norm": latent_norm,
+        # Hybrid optimizer parameters
+        "hybrid_optimizer": hybrid_optimizer,
+        "adam_iterations": adam_iterations,
+        "lbfgs_iterations": lbfgs_iterations,
+        "lbfgs_lr": lbfgs_lr,
+        "lbfgs_max_iter": lbfgs_max_iter,
+        "lbfgs_history_size": lbfgs_history_size,
     }
 
     loss, latent = reconstruct_latent(**reconstruct_inputs)
@@ -907,7 +991,7 @@ def reconstruct_mesh(
     for decoder_idx, decoder in enumerate(decoders):
         # pass alignment parameters to return mesh to original position
         # pass number of objects in case decoder is a multi-object decoder
-        mesh = create_mesh(
+        mesh = create_mesh_adaptive(
             decoder=decoder.to(device),
             latent_vector=latent.to(device),
             n_pts_per_axis=n_pts_per_axis,
