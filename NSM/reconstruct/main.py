@@ -242,6 +242,7 @@ def reconstruct_latent_preprocess_sdf_gt(sdf_gt, clamp_dist, device="cuda", verb
 
 
 def project_latent(latent, latent_norm):
+    """Legacy explicit projection function - use latent_norm_penalty for smoother optimization"""
     if isinstance(latent_norm, (list, tuple)):
         if len(latent_norm) != 2:
             raise ValueError("latent_norm must be a single value or a tuple/list of two values")
@@ -255,6 +256,76 @@ def project_latent(latent, latent_norm):
         norm = latent.norm(p=2)
         norm_clipped = norm.clamp(min=min_, max=max_)
         latent.data.mul_(norm_clipped / (norm + 1e-8))
+
+
+def latent_norm_penalty(latent, target_norm, penalty_weight=1.0, penalty_type="quadratic"):
+    """
+    Compute a soft penalty term to encourage latent norm to be near target_norm.
+    This is smoother than explicit projection and works better with gradient-based optimizers.
+    
+    Args:
+        latent: The latent vector
+        target_norm: Target norm value or (min_norm, max_norm) tuple
+        penalty_weight: Weight for the penalty term
+        penalty_type: "quadratic", "huber", or "barrier"
+    
+    Returns:
+        penalty: Scalar penalty term to add to loss
+    """
+    current_norm = latent.norm(p=2)
+    
+    if isinstance(target_norm, (list, tuple)):
+        if len(target_norm) != 2:
+            raise ValueError("target_norm must be a single value or a tuple/list of two values")
+        min_norm, max_norm = target_norm
+        
+        if penalty_type == "quadratic":
+            # Quadratic penalty outside the range [min_norm, max_norm]
+            if current_norm < min_norm:
+                penalty = (current_norm - min_norm) ** 2
+            elif current_norm > max_norm:
+                penalty = (current_norm - max_norm) ** 2
+            else:
+                penalty = 0.0
+        elif penalty_type == "huber":
+            # Huber loss outside the range - smoother than quadratic
+            delta = (max_norm - min_norm) * 0.1  # 10% of range as threshold
+            if current_norm < min_norm:
+                diff = min_norm - current_norm
+                penalty = torch.where(diff <= delta, 
+                                    0.5 * diff ** 2,
+                                    delta * (diff - 0.5 * delta))
+            elif current_norm > max_norm:
+                diff = current_norm - max_norm
+                penalty = torch.where(diff <= delta,
+                                    0.5 * diff ** 2, 
+                                    delta * (diff - 0.5 * delta))
+            else:
+                penalty = 0.0
+        elif penalty_type == "barrier":
+            # Log barrier penalty that becomes infinite at boundaries
+            eps = 1e-6
+            penalty = -torch.log(current_norm - min_norm + eps) - torch.log(max_norm - current_norm + eps)
+        else:
+            raise ValueError(f"Unknown penalty_type: {penalty_type}")
+            
+    else:
+        # Single target norm
+        if penalty_type == "quadratic":
+            penalty = (current_norm - target_norm) ** 2
+        elif penalty_type == "huber":
+            diff = torch.abs(current_norm - target_norm)
+            delta = target_norm * 0.1  # 10% of target as threshold
+            penalty = torch.where(diff <= delta,
+                                0.5 * diff ** 2,
+                                delta * (diff - 0.5 * delta))
+        elif penalty_type == "barrier":
+            # For single target, use quadratic penalty (barrier doesn't make sense)
+            penalty = (current_norm - target_norm) ** 2
+        else:
+            raise ValueError(f"Unknown penalty_type: {penalty_type}")
+    
+    return penalty_weight * penalty
 
 
 def reconstruct_latent(
@@ -294,6 +365,10 @@ def reconstruct_latent(
     lbfgs_lr=1.0,  # Learning rate for LBFGS phase
     lbfgs_max_iter=20,  # Max iterations per LBFGS step
     lbfgs_history_size=100,  # LBFGS history size
+    # Soft norm constraint parameters (alternative to hard projection)
+    use_soft_norm_constraint=True,  # Use soft penalty instead of hard projection
+    norm_penalty_weight=1e-3,  # Weight for norm penalty term
+    norm_penalty_type="quadratic",  # "quadratic", "huber", or "barrier"
     **kwargs,
 ):
 
@@ -604,18 +679,26 @@ def reconstruct_latent(
             else:
                 latent_loss = 0
 
-            total_loss = recon_loss + latent_loss + eikonal_weight * eikonal_loss_value
+            # Compute norm penalty (soft constraint alternative to hard projection)
+            norm_penalty_loss = 0
+            if latent_norm is not None and use_soft_norm_constraint:
+                norm_penalty_loss = latent_norm_penalty(
+                    latent, latent_norm, norm_penalty_weight, norm_penalty_type
+                )
 
-            return total_loss, recon_loss, latent_loss, eikonal_loss_value
+            total_loss = recon_loss + latent_loss + eikonal_weight * eikonal_loss_value + norm_penalty_loss
+
+            return total_loss, recon_loss, latent_loss, eikonal_loss_value, norm_penalty_loss
 
         def step_closure():
             """LBFGS closure - computes loss and gradients, with optional latent projection"""
             current_optimizer.zero_grad()
-            total_loss, _, _, _ = compute_loss()
+            total_loss, _, _, _, _ = compute_loss()
             total_loss.backward()
             
-            # Project latent during LBFGS internal iterations if norm constraint is specified
-            if current_optimizer_name == "lbfgs" and latent_norm is not None:
+            # Only use hard projection if soft constraint is disabled
+            if (current_optimizer_name == "lbfgs" and latent_norm is not None 
+                and not use_soft_norm_constraint):
                 with torch.no_grad():
                     project_latent(latent, latent_norm)
             
@@ -624,17 +707,19 @@ def reconstruct_latent(
         # Run the appropriate optimizer step
         if current_optimizer_name == "adam":
             current_optimizer.zero_grad()
-            loss_, recon_loss_, latent_loss_, eikonal_loss_ = compute_loss()
+            loss_, recon_loss_, latent_loss_, eikonal_loss_, norm_penalty_loss_ = compute_loss()
             loss_.backward()  # Adam: explicitly call backward
             current_optimizer.step()
         elif current_optimizer_name == "lbfgs":
             loss_ = current_optimizer.step(step_closure)  # LBFGS handles backward internally
             # Compute final losses for tracking (without gradients)
             with torch.no_grad():
-                _, recon_loss_, latent_loss_, eikonal_loss_ = compute_loss()
+                _, recon_loss_, latent_loss_, eikonal_loss_, norm_penalty_loss_ = compute_loss()
 
         # check if want to project onto hypersphere (skip for LBFGS since it's done in closure)
-        if latent_norm is not None and current_optimizer_name != "lbfgs":
+        # Only use hard projection if soft constraint is disabled
+        if (latent_norm is not None and current_optimizer_name != "lbfgs" 
+            and not use_soft_norm_constraint):
             if verbose is True:
                 print(f"Projecting latent onto hypersphere of norm in range: {latent_norm}")
             project_latent(latent, latent_norm)
@@ -648,6 +733,9 @@ def reconstruct_latent(
                 if eikonal_weight > 0:
                     eikonal_val = eikonal_loss_.item() if hasattr(eikonal_loss_, 'item') else float(eikonal_loss_)
                     print(f"\tEikonal loss: {eikonal_val:.6f}")
+                if latent_norm is not None and use_soft_norm_constraint:
+                    norm_penalty_val = norm_penalty_loss_.item() if hasattr(norm_penalty_loss_, 'item') else float(norm_penalty_loss_)
+                    print(f"\tNorm penalty loss: {norm_penalty_val:.6f}")
                 print("\tLatent norm: ", latent.norm)
 
         # Log to wandb as appropriate
@@ -661,6 +749,8 @@ def reconstruct_latent(
             }
             if eikonal_weight > 0:
                 log_dict["eikonal_loss"] = eikonal_loss_.item() if hasattr(eikonal_loss_, 'item') else float(eikonal_loss_)
+            if latent_norm is not None and use_soft_norm_constraint:
+                log_dict["norm_penalty_loss"] = norm_penalty_loss_.item() if hasattr(norm_penalty_loss_, 'item') else float(norm_penalty_loss_)
             wandb.log(log_dict)
 
         # Handle end of loop accounting of loss/latent based on convergence criteria
@@ -753,6 +843,10 @@ def reconstruct_mesh(
     lbfgs_lr=1.0,  # Learning rate for LBFGS phase
     lbfgs_max_iter=20,  # Max iterations per LBFGS step
     lbfgs_history_size=100,  # LBFGS history size
+    # Soft norm constraint parameters (alternative to hard projection)
+    use_soft_norm_constraint=True,  # Use soft penalty instead of hard projection
+    norm_penalty_weight=1e-3,  # Weight for norm penalty term
+    norm_penalty_type="quadratic",  # "quadratic", "huber", or "barrier"
     **kwargs,
 ):
     """
@@ -973,6 +1067,10 @@ def reconstruct_mesh(
         "lbfgs_lr": lbfgs_lr,
         "lbfgs_max_iter": lbfgs_max_iter,
         "lbfgs_history_size": lbfgs_history_size,
+        # Soft norm constraint parameters
+        "use_soft_norm_constraint": use_soft_norm_constraint,
+        "norm_penalty_weight": norm_penalty_weight,
+        "norm_penalty_type": norm_penalty_type,
     }
 
     loss, latent = reconstruct_latent(**reconstruct_inputs)
