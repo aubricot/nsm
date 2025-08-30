@@ -11,7 +11,7 @@ from NSM.datasets import read_mesh_get_sampled_pts, read_meshes_get_sampled_pts
 from NSM.datasets.sdf_dataset import combine_meshes
 from NSM.mesh import create_mesh_adaptive
 from NSM.losses import eikonal_loss
-from NSM.models.triplanar import lbfgs_sticky_step
+
 
 import numpy as np
 import sys
@@ -611,17 +611,15 @@ def reconstruct_latent(
                 decoder_start = time.time()
                 
                 # Fast inference mode: pass latent and xyz separately
-                # Only use sticky features for L-BFGS (where they provide the most benefit)
-                use_sticky = (current_optimizer_name == "lbfgs")
                 
                 # Gradient checking
                 logger.debug(f"GRADIENT_CHECK_BEFORE: latent.requires_grad={latent.requires_grad}")
                 
                 # Fast inference: now that gradient flow is fixed, use the optimized path
-                pred_sdf = decoder(latent=latent.squeeze(0), xyz=xyz_input, sticky=use_sticky)
+                pred_sdf = decoder(latent=latent.squeeze(0), xyz=xyz_input)
                 logger.debug(f"GRADIENT_CHECK_AFTER: pred_sdf.requires_grad={pred_sdf.requires_grad}")
                 logger.debug(f"DECODER: Using FAST inference interface")
-                logger.debug(f"DECODER: Fast inference ({current_optimizer_name}, sticky={use_sticky}) took {time.time() - decoder_start:.4f}s")
+                logger.debug(f"DECODER: Fast inference ({current_optimizer_name}) took {time.time() - decoder_start:.4f}s")
                 
                 # initialize loss as zeros with same device (will be averaged later)
                 _loss_ = 0
@@ -709,10 +707,8 @@ def reconstruct_latent(
                     eik_start = time.time()
                     
                     # Fast inference mode for eikonal loss
-                    # Only use sticky features for L-BFGS (where they provide the most benefit)
-                    use_sticky_eik = (current_optimizer_name == "lbfgs")
-                    pred_sdf_grad = decoder(latent=latent.squeeze(0), xyz=xyz_input_grad, sticky=use_sticky_eik)
-                    logger.debug(f"EIKONAL: Fast inference ({current_optimizer_name}, sticky={use_sticky_eik}) took {time.time() - eik_start:.4f}s")
+                    pred_sdf_grad = decoder(latent=latent.squeeze(0), xyz=xyz_input_grad)
+                    logger.debug(f"EIKONAL: Fast inference ({current_optimizer_name}) took {time.time() - eik_start:.4f}s")
                     
                     eik_loss = eikonal_loss(pred_sdf_grad, xyz_input_grad, reduction="mean")
                     eikonal_loss_value += eik_loss
@@ -802,18 +798,8 @@ def reconstruct_latent(
             current_optimizer.step()
         elif current_optimizer_name == "lbfgs":
             logger.debug("DEBUG: Taking LBFGS optimizer step")
-            # Use sticky features for L-BFGS optimization with context manager
-            use_sticky = any(hasattr(decoder, 'clear_sticky') for decoder in decoders)
-            if use_sticky:
-                logger.debug(f"LBFGS: Using sticky features for step {step} with {len(decoders)} decoder(s)")
-                logger.debug(f"LBFGS: Latent shape: {latent.shape}, points per batch: {xyz_subset.shape[0] if 'xyz_subset' in locals() else 'unknown'}")
-                
-                # For L-BFGS, we use sticky features to cache plane features
-                with lbfgs_sticky_step(decoders[0], latent.squeeze(0)):
-                    loss_ = current_optimizer.step(step_closure)
-            else:
-                logger.debug(f"LBFGS: No sticky features available - decoder type: {type(decoders[0]).__name__}")
-                loss_ = current_optimizer.step(step_closure)
+            # L-BFGS optimization step
+            loss_ = current_optimizer.step(step_closure)
             # Compute final losses for tracking (without gradients)
             with torch.no_grad():
                 _, recon_loss_, latent_loss_, eikonal_loss_, norm_penalty_loss_ = compute_loss()

@@ -588,7 +588,7 @@ def create_grid_samples(
 
 def get_sdfs(decoder, samples, latent_vector, batch_size=32**3, objects=1, device="cuda"):
     """
-    Get SDF values for samples with sticky cache optimization for triplanar models.
+    Get SDF values for samples.
     
     Args:
         decoder: The decoder model
@@ -602,13 +602,6 @@ def get_sdfs(decoder, samples, latent_vector, batch_size=32**3, objects=1, devic
     current_idx = 0
     sdf_values = torch.zeros(samples.shape[0], objects)
 
-    # Check if decoder is a triplanar model
-    is_triplanar = hasattr(decoder, 'clear_sticky') and hasattr(decoder, '_sticky_latent')
-    
-    if is_triplanar:
-        decoder.clear_sticky()  # Clear any existing cache
-        print("Detected triplanar model - using sticky cache optimization")
-
     if batch_size > n_pts_total:
         print(
             "WARNING: batch_size is greater than the number of samples, setting batch_size to the number of samples"
@@ -620,24 +613,18 @@ def get_sdfs(decoder, samples, latent_vector, batch_size=32**3, objects=1, devic
         current_batch_size = min(batch_size, n_pts_total - current_idx)
         sampled_pts = samples[current_idx : current_idx + current_batch_size, :3].to(device)
         
-        # Use sticky mode for triplanar models
-        use_sticky = is_triplanar and latent_vector is not None
         sdf_values[current_idx : current_idx + current_batch_size, :] = (
-            decode_sdf(decoder, latent_vector, sampled_pts, sticky=use_sticky).detach().cpu()
+            decode_sdf(decoder, latent_vector, sampled_pts).detach().cpu()
         )
 
         current_idx += current_batch_size
-        if is_triplanar:
-            batch_info = f" (batch {batch_num+1}: {'CNN+MLP' if batch_num == 0 else 'cached planes+MLP'}, size={current_batch_size})"
-        else:
-            batch_info = f" (batch {batch_num+1}, size={current_batch_size})"
-        print(f"Processed {current_idx} / {n_pts_total} points{batch_info}")
+        print(f"Processed {current_idx} / {n_pts_total} points (batch {batch_num+1}: CNN+MLP, size={current_batch_size})")
         batch_num += 1
         
     return sdf_values
 
 
-def decode_sdf(decoder, latent_vector, queries, sticky=True):
+def decode_sdf(decoder, latent_vector, queries):
     """
     Decode SDF values for query points.
     
@@ -645,7 +632,6 @@ def decode_sdf(decoder, latent_vector, queries, sticky=True):
         decoder: The decoder model
         latent_vector: Latent code for the shape
         queries: Query points (N, 3)
-        sticky: If True, use sticky cache for triplanar models
     """
     num_samples = queries.shape[0]
 
@@ -653,14 +639,14 @@ def decode_sdf(decoder, latent_vector, queries, sticky=True):
         inputs = queries
         return decoder(inputs)
     else:
+        # Check if decoder supports fast inference interface (latent + xyz)
+        if hasattr(decoder, 'forward'):
+            sig = inspect.signature(decoder.forward)
+            if 'latent' in sig.parameters and 'xyz' in sig.parameters:
+                # Use fast inference interface
+                return decoder(latent=latent_vector.squeeze(), xyz=queries)
+        
+        # Fall back to legacy concatenated interface
         latent_repeat = latent_vector.expand(num_samples, -1)
         inputs = torch.cat([latent_repeat, queries], dim=1)
-        
-        # Use sticky mode if requested and supported by the decoder
-        if sticky and hasattr(decoder, 'forward'):
-            # Check if decoder supports sticky parameter
-            sig = inspect.signature(decoder.forward)
-            if 'sticky' in sig.parameters:
-                return decoder(inputs, sticky=True)
-        
         return decoder(inputs)
