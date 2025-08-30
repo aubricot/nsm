@@ -11,6 +11,7 @@ from NSM.datasets import read_mesh_get_sampled_pts, read_meshes_get_sampled_pts
 from NSM.datasets.sdf_dataset import combine_meshes
 from NSM.mesh import create_mesh_adaptive
 from NSM.losses import eikonal_loss
+from NSM.models.triplanar import lbfgs_sticky_step
 
 import numpy as np
 import sys
@@ -526,6 +527,11 @@ def reconstruct_latent(
             
             logger.debug(f"DEBUG: Starting compute_loss call #{_compute_loss_call_count}")
             
+            # Track timing for each section
+            section_times = {}
+            
+            # 1. Sample selection timing
+            sample_start = time.time()
             if n_samples_init is not None:
                 n_samples_ = n_samples_init + int(
                     (max_n_samples - n_samples_init) * min(1.0, (step / n_steps_sample_ramp))
@@ -584,21 +590,41 @@ def reconstruct_latent(
             else:
                 xyz_input = xyz
                 sdf_gt_ = sdf_gt
+                
+            section_times['sample_selection'] = time.time() - sample_start
 
-            latent_input_ = latent.expand(n_samples_, -1)
+            # 2. Input preparation timing
+            prep_start = time.time()
+            # For reconstruction, we ALWAYS have a single latent, so always use fast inference
+            # (Since we control this codebase and just implemented the interface)
+            use_fast_inference = True
+            logger.debug(f"INFERENCE: Using fast interface for single latent reconstruction")
+            section_times['input_prep'] = time.time() - prep_start
 
-            # concat latent and xyz that will be inputted into decoder.
-            inputs = torch.cat([latent_input_, xyz_input], dim=1)
-
+            # 3. Decoder forward pass timing
+            decoder_start = time.time()
             recon_loss = 0
 
             # Iterate over the decoders (if there are multiple)
             for decoder_idx, decoder in enumerate(decoders):
                 # Single forward pass - no batching loop needed
-                pred_sdf = decoder(inputs)
+                decoder_start = time.time()
                 
-                # initialize loss as zeros
-                _loss_ = torch.zeros(inputs.shape[0], device=torch.device(device))
+                # Fast inference mode: pass latent and xyz separately
+                # Only use sticky features for L-BFGS (where they provide the most benefit)
+                use_sticky = (current_optimizer_name == "lbfgs")
+                
+                # Gradient checking
+                logger.debug(f"GRADIENT_CHECK_BEFORE: latent.requires_grad={latent.requires_grad}")
+                
+                # Fast inference: now that gradient flow is fixed, use the optimized path
+                pred_sdf = decoder(latent=latent.squeeze(0), xyz=xyz_input, sticky=use_sticky)
+                logger.debug(f"GRADIENT_CHECK_AFTER: pred_sdf.requires_grad={pred_sdf.requires_grad}")
+                logger.debug(f"DECODER: Using FAST inference interface")
+                logger.debug(f"DECODER: Fast inference ({current_optimizer_name}, sticky={use_sticky}) took {time.time() - decoder_start:.4f}s")
+                
+                # initialize loss as zeros with same device (will be averaged later)
+                _loss_ = 0
 
                 # Apply clamping distance - to ignore points that are too far away
                 if clamp_dist is not None:
@@ -668,24 +694,37 @@ def reconstruct_latent(
                 _loss_ = torch.mean(_loss_)
                 # update the local loss
                 recon_loss += _loss_
+                
+            section_times['decoder_forward'] = time.time() - decoder_start
 
+            # 4. Eikonal loss timing
+            eikonal_start = time.time()
             # Compute eikonal loss - enforces ||∇f|| = 1 constraint for valid SDFs
             eikonal_loss_value = 0
             if eikonal_weight > 0:
                 # Need to recompute with gradients enabled for eikonal loss
                 xyz_input_grad = xyz_input.detach().requires_grad_(True)
-                latent_input_grad = latent.expand(n_samples_, -1)
-                inputs_grad = torch.cat([latent_input_grad, xyz_input_grad], dim=1)
                 
                 for decoder_idx, decoder in enumerate(decoders):
-                    pred_sdf_grad = decoder(inputs_grad)
+                    eik_start = time.time()
+                    
+                    # Fast inference mode for eikonal loss
+                    # Only use sticky features for L-BFGS (where they provide the most benefit)
+                    use_sticky_eik = (current_optimizer_name == "lbfgs")
+                    pred_sdf_grad = decoder(latent=latent.squeeze(0), xyz=xyz_input_grad, sticky=use_sticky_eik)
+                    logger.debug(f"EIKONAL: Fast inference ({current_optimizer_name}, sticky={use_sticky_eik}) took {time.time() - eik_start:.4f}s")
+                    
                     eik_loss = eikonal_loss(pred_sdf_grad, xyz_input_grad, reduction="mean")
                     eikonal_loss_value += eik_loss
                 
                 # Average over decoders if multiple
                 if len(decoders) > 1:
                     eikonal_loss_value = eikonal_loss_value / len(decoders)
+                    
+            section_times['eikonal_loss'] = time.time() - eikonal_start
 
+            # 5. Other losses timing
+            other_losses_start = time.time()
             # Compute latent loss - used to constrain new predictions to be close to zero (mean)
             # penalizing "abnormal" shapes
             if l2reg is True:
@@ -701,9 +740,33 @@ def reconstruct_latent(
                 )
 
             total_loss = recon_loss + latent_loss + eikonal_weight * eikonal_loss_value + norm_penalty_loss
+            section_times['other_losses'] = time.time() - other_losses_start
+            
+            # GRADIENT DEBUGGING: Check if gradients can flow back to latent
+            logger.debug(f"GRADIENT_TEST: total_loss.requires_grad={total_loss.requires_grad}")
+            # Note: latent.grad will be None here because backward() hasn't been called yet
 
             toc = time.time()
-            logger.debug(f"DEBUG: Finished compute_loss call #{_compute_loss_call_count} in {toc - tic:.4f} seconds")
+            total_time = toc - tic
+            
+            # Log detailed timing breakdown
+            logger.debug(f"DEBUG: Finished compute_loss call #{_compute_loss_call_count} in {total_time:.4f} seconds")
+            logger.debug(f"TIMING: Sample selection: {section_times['sample_selection']:.4f}s "
+                        f"({section_times['sample_selection']/total_time*100:.1f}%)")
+            logger.debug(f"TIMING: Input prep: {section_times['input_prep']:.4f}s "
+                        f"({section_times['input_prep']/total_time*100:.1f}%)")
+            logger.debug(f"TIMING: Decoder forward: {section_times['decoder_forward']:.4f}s "
+                        f"({section_times['decoder_forward']/total_time*100:.1f}%)")
+            logger.debug(f"TIMING: Eikonal loss: {section_times['eikonal_loss']:.4f}s "
+                        f"({section_times['eikonal_loss']/total_time*100:.1f}%)")
+            logger.debug(f"TIMING: Other losses: {section_times['other_losses']:.4f}s "
+                        f"({section_times['other_losses']/total_time*100:.1f}%)")
+            
+            # Calculate unaccounted time
+            accounted_time = sum(section_times.values())
+            unaccounted_time = total_time - accounted_time
+            logger.debug(f"TIMING: Unaccounted time: {unaccounted_time:.4f}s "
+                        f"({unaccounted_time/total_time*100:.1f}%)")
 
             return total_loss, recon_loss, latent_loss, eikonal_loss_value, norm_penalty_loss
 
@@ -711,7 +774,8 @@ def reconstruct_latent(
             """LBFGS closure - computes loss and gradients, with optional latent projection"""
             current_optimizer.zero_grad()
             total_loss, _, _, _, _ = compute_loss()
-            total_loss.backward()
+            # retain_graph=True because LBFGS will call this closure multiple times
+            total_loss.backward(retain_graph=True)
             
             # Only use hard projection if soft constraint is disabled
             if (current_optimizer_name == "lbfgs" and latent_norm is not None 
@@ -726,14 +790,36 @@ def reconstruct_latent(
             logger.debug("DEBUG: Taking Adam optimizer step")
             current_optimizer.zero_grad()
             loss_, recon_loss_, latent_loss_, eikonal_loss_, norm_penalty_loss_ = compute_loss()
+            
+            # LOSS DEBUGGING: Log actual loss values
+            logger.debug(f"LOSS_VALUES: Step {step} - Total: {loss_.item():.6f}, Recon: {recon_loss_.item():.6f}, Latent norm: {latent.norm().item():.6f}")
+            
+            # GRADIENT DEBUGGING: Check gradients after backward
+            logger.debug(f"GRADIENT_PRE_BACKWARD: latent.grad is {'None' if latent.grad is None else 'not None'}")
             loss_.backward()  # Adam: explicitly call backward
+            logger.debug(f"GRADIENT_POST_BACKWARD: latent.grad is {'None' if latent.grad is None else f'norm={latent.grad.norm().item():.6f}'}")
+            
             current_optimizer.step()
         elif current_optimizer_name == "lbfgs":
             logger.debug("DEBUG: Taking LBFGS optimizer step")
-            loss_ = current_optimizer.step(step_closure)  # LBFGS handles backward internally
+            # Use sticky features for L-BFGS optimization with context manager
+            use_sticky = any(hasattr(decoder, 'clear_sticky') for decoder in decoders)
+            if use_sticky:
+                logger.debug(f"LBFGS: Using sticky features for step {step} with {len(decoders)} decoder(s)")
+                logger.debug(f"LBFGS: Latent shape: {latent.shape}, points per batch: {xyz_subset.shape[0] if 'xyz_subset' in locals() else 'unknown'}")
+                
+                # For L-BFGS, we use sticky features to cache plane features
+                with lbfgs_sticky_step(decoders[0], latent.squeeze(0)):
+                    loss_ = current_optimizer.step(step_closure)
+            else:
+                logger.debug(f"LBFGS: No sticky features available - decoder type: {type(decoders[0]).__name__}")
+                loss_ = current_optimizer.step(step_closure)
             # Compute final losses for tracking (without gradients)
             with torch.no_grad():
                 _, recon_loss_, latent_loss_, eikonal_loss_, norm_penalty_loss_ = compute_loss()
+            
+            # LOSS DEBUGGING: Log actual loss values for LBFGS
+            logger.debug(f"LOSS_VALUES: Step {step} - Total: {loss_.item():.6f}, Recon: {recon_loss_.item():.6f}, Latent norm: {latent.norm().item():.6f}")
 
         # check if want to project onto hypersphere (skip for LBFGS since it's done in closure)
         # Only use hard projection if soft constraint is disabled
