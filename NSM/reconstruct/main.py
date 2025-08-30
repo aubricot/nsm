@@ -1,4 +1,5 @@
 import torch
+import logging
 
 from .utils import adjust_learning_rate
 
@@ -19,6 +20,13 @@ import pymskt as mskt
 import wandb
 import time
 from fnmatch import fnmatch
+
+# Setup logging for debugging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Global variable to track compute_loss call count
+_compute_loss_call_count = 0
 
 try:
     from NSM.dependencies import sinkhorn
@@ -512,6 +520,12 @@ def reconstruct_latent(
 
         def compute_loss():
             """Compute loss for current latent vector - used by both Adam and LBFGS"""
+            global _compute_loss_call_count
+            _compute_loss_call_count += 1
+            tic = time.time()
+            
+            logger.debug(f"DEBUG: Starting compute_loss call #{_compute_loss_call_count}")
+            
             if n_samples_init is not None:
                 n_samples_ = n_samples_init + int(
                     (max_n_samples - n_samples_init) * min(1.0, (step / n_steps_sample_ramp))
@@ -688,6 +702,9 @@ def reconstruct_latent(
 
             total_loss = recon_loss + latent_loss + eikonal_weight * eikonal_loss_value + norm_penalty_loss
 
+            toc = time.time()
+            logger.debug(f"DEBUG: Finished compute_loss call #{_compute_loss_call_count} in {toc - tic:.4f} seconds")
+
             return total_loss, recon_loss, latent_loss, eikonal_loss_value, norm_penalty_loss
 
         def step_closure():
@@ -706,11 +723,13 @@ def reconstruct_latent(
 
         # Run the appropriate optimizer step
         if current_optimizer_name == "adam":
+            logger.debug("DEBUG: Taking Adam optimizer step")
             current_optimizer.zero_grad()
             loss_, recon_loss_, latent_loss_, eikonal_loss_, norm_penalty_loss_ = compute_loss()
             loss_.backward()  # Adam: explicitly call backward
             current_optimizer.step()
         elif current_optimizer_name == "lbfgs":
+            logger.debug("DEBUG: Taking LBFGS optimizer step")
             loss_ = current_optimizer.step(step_closure)  # LBFGS handles backward internally
             # Compute final losses for tracking (without gradients)
             with torch.no_grad():
