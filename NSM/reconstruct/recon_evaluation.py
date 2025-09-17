@@ -91,6 +91,9 @@ def compute_recon_loss(
                 assd_loss_ = np.nan
                 logger.warning(f"Mesh {mesh_idx}: ASSD set to NaN (no reconstructed mesh)")
             else:
+                # make sure the points for the meshes are the same types
+                mesh.point_coords = mesh.point_coords.astype(np.float32)
+                orig_meshes[mesh_idx].point_coords = orig_meshes[mesh_idx].point_coords.astype(np.float32)
                 assd_loss_ = mesh.get_assd_mesh(orig_meshes[mesh_idx])
                 logger.debug(f"Mesh {mesh_idx}: ASSD = {assd_loss_:.6f}")
                 #     xyz_orig_,

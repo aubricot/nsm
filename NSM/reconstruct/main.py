@@ -22,12 +22,11 @@ import wandb
 import time
 from fnmatch import fnmatch
 
-# Setup logging for debugging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Global variable to track compute_loss call count
-_compute_loss_call_count = 0
+
 
 try:
     from NSM.dependencies import sinkhorn
@@ -492,9 +491,7 @@ def reconstruct_latent(
             # Handle transition from Adam to LBFGS
             if step == adam_iterations and not switched_to_lbfgs and lbfgs_iterations > 0:
                 switched_to_lbfgs = True
-                if verbose:
-                    print(f"Switching from Adam to LBFGS at step {step}")
-                    print(f"Current latent norm: {latent.norm().item():.6f}")
+                logger.info(f"Switching from Adam to LBFGS at step {step} (latent_norm: {latent.norm().item():.6f})")
         else:
             current_optimizer_name = optimizer_name
             current_optimizer = optimizer
@@ -521,17 +518,8 @@ def reconstruct_latent(
 
         def compute_loss():
             """Compute loss for current latent vector - used by both Adam and LBFGS"""
-            global _compute_loss_call_count
-            _compute_loss_call_count += 1
-            tic = time.time()
             
-            logger.debug(f"DEBUG: Starting compute_loss call #{_compute_loss_call_count}")
-            
-            # Track timing for each section
-            section_times = {}
-            
-            # 1. Sample selection timing
-            sample_start = time.time()
+            # Sample selection
             if n_samples_init is not None:
                 n_samples_ = n_samples_init + int(
                     (max_n_samples - n_samples_init) * min(1.0, (step / n_steps_sample_ramp))
@@ -590,36 +578,14 @@ def reconstruct_latent(
             else:
                 xyz_input = xyz
                 sdf_gt_ = sdf_gt
-                
-            section_times['sample_selection'] = time.time() - sample_start
 
-            # 2. Input preparation timing
-            prep_start = time.time()
-            # For reconstruction, we ALWAYS have a single latent, so always use fast inference
-            # (Since we control this codebase and just implemented the interface)
-            use_fast_inference = True
-            logger.debug(f"INFERENCE: Using fast interface for single latent reconstruction")
-            section_times['input_prep'] = time.time() - prep_start
-
-            # 3. Decoder forward pass timing
-            decoder_start = time.time()
+            # Decoder forward pass
             recon_loss = 0
 
             # Iterate over the decoders (if there are multiple)
             for decoder_idx, decoder in enumerate(decoders):
-                # Single forward pass - no batching loop needed
-                decoder_start = time.time()
-                
-                # Fast inference mode: pass latent and xyz separately
-                
-                # Gradient checking
-                logger.debug(f"GRADIENT_CHECK_BEFORE: latent.requires_grad={latent.requires_grad}")
-                
-                # Fast inference: now that gradient flow is fixed, use the optimized path
+                # Fast inference: pass latent and xyz separately
                 pred_sdf = decoder(latent=latent.squeeze(0), xyz=xyz_input)
-                logger.debug(f"GRADIENT_CHECK_AFTER: pred_sdf.requires_grad={pred_sdf.requires_grad}")
-                logger.debug(f"DECODER: Using FAST inference interface")
-                logger.debug(f"DECODER: Fast inference ({current_optimizer_name}) took {time.time() - decoder_start:.4f}s")
                 
                 # initialize loss as zeros with same device (will be averaged later)
                 _loss_ = 0
@@ -692,11 +658,8 @@ def reconstruct_latent(
                 _loss_ = torch.mean(_loss_)
                 # update the local loss
                 recon_loss += _loss_
-                
-            section_times['decoder_forward'] = time.time() - decoder_start
 
-            # 4. Eikonal loss timing
-            eikonal_start = time.time()
+            # Eikonal loss computation
             # Compute eikonal loss - enforces ||∇f|| = 1 constraint for valid SDFs
             eikonal_loss_value = 0
             if eikonal_weight > 0:
@@ -704,23 +667,16 @@ def reconstruct_latent(
                 xyz_input_grad = xyz_input.detach().requires_grad_(True)
                 
                 for decoder_idx, decoder in enumerate(decoders):
-                    eik_start = time.time()
-                    
                     # Fast inference mode for eikonal loss
                     pred_sdf_grad = decoder(latent=latent.squeeze(0), xyz=xyz_input_grad)
-                    logger.debug(f"EIKONAL: Fast inference ({current_optimizer_name}) took {time.time() - eik_start:.4f}s")
-                    
                     eik_loss = eikonal_loss(pred_sdf_grad, xyz_input_grad, reduction="mean")
                     eikonal_loss_value += eik_loss
                 
                 # Average over decoders if multiple
                 if len(decoders) > 1:
                     eikonal_loss_value = eikonal_loss_value / len(decoders)
-                    
-            section_times['eikonal_loss'] = time.time() - eikonal_start
 
-            # 5. Other losses timing
-            other_losses_start = time.time()
+            # Other losses
             # Compute latent loss - used to constrain new predictions to be close to zero (mean)
             # penalizing "abnormal" shapes
             if l2reg is True:
@@ -736,33 +692,6 @@ def reconstruct_latent(
                 )
 
             total_loss = recon_loss + latent_loss + eikonal_weight * eikonal_loss_value + norm_penalty_loss
-            section_times['other_losses'] = time.time() - other_losses_start
-            
-            # GRADIENT DEBUGGING: Check if gradients can flow back to latent
-            logger.debug(f"GRADIENT_TEST: total_loss.requires_grad={total_loss.requires_grad}")
-            # Note: latent.grad will be None here because backward() hasn't been called yet
-
-            toc = time.time()
-            total_time = toc - tic
-            
-            # Log detailed timing breakdown
-            logger.debug(f"DEBUG: Finished compute_loss call #{_compute_loss_call_count} in {total_time:.4f} seconds")
-            logger.debug(f"TIMING: Sample selection: {section_times['sample_selection']:.4f}s "
-                        f"({section_times['sample_selection']/total_time*100:.1f}%)")
-            logger.debug(f"TIMING: Input prep: {section_times['input_prep']:.4f}s "
-                        f"({section_times['input_prep']/total_time*100:.1f}%)")
-            logger.debug(f"TIMING: Decoder forward: {section_times['decoder_forward']:.4f}s "
-                        f"({section_times['decoder_forward']/total_time*100:.1f}%)")
-            logger.debug(f"TIMING: Eikonal loss: {section_times['eikonal_loss']:.4f}s "
-                        f"({section_times['eikonal_loss']/total_time*100:.1f}%)")
-            logger.debug(f"TIMING: Other losses: {section_times['other_losses']:.4f}s "
-                        f"({section_times['other_losses']/total_time*100:.1f}%)")
-            
-            # Calculate unaccounted time
-            accounted_time = sum(section_times.values())
-            unaccounted_time = total_time - accounted_time
-            logger.debug(f"TIMING: Unaccounted time: {unaccounted_time:.4f}s "
-                        f"({unaccounted_time/total_time*100:.1f}%)")
 
             return total_loss, recon_loss, latent_loss, eikonal_loss_value, norm_penalty_loss
 
@@ -783,29 +712,20 @@ def reconstruct_latent(
 
         # Run the appropriate optimizer step
         if current_optimizer_name == "adam":
-            logger.debug("DEBUG: Taking Adam optimizer step")
             current_optimizer.zero_grad()
             loss_, recon_loss_, latent_loss_, eikonal_loss_, norm_penalty_loss_ = compute_loss()
-            
-            # LOSS DEBUGGING: Log actual loss values
-            logger.debug(f"LOSS_VALUES: Step {step} - Total: {loss_.item():.6f}, Recon: {recon_loss_.item():.6f}, Latent norm: {latent.norm().item():.6f}")
-            
-            # GRADIENT DEBUGGING: Check gradients after backward
-            logger.debug(f"GRADIENT_PRE_BACKWARD: latent.grad is {'None' if latent.grad is None else 'not None'}")
-            loss_.backward()  # Adam: explicitly call backward
-            logger.debug(f"GRADIENT_POST_BACKWARD: latent.grad is {'None' if latent.grad is None else f'norm={latent.grad.norm().item():.6f}'}")
-            
+            loss_.backward()
             current_optimizer.step()
         elif current_optimizer_name == "lbfgs":
-            logger.debug("DEBUG: Taking LBFGS optimizer step")
             # L-BFGS optimization step
             loss_ = current_optimizer.step(step_closure)
             # Compute final losses for tracking (without gradients)
             with torch.no_grad():
                 _, recon_loss_, latent_loss_, eikonal_loss_, norm_penalty_loss_ = compute_loss()
-            
-            # LOSS DEBUGGING: Log actual loss values for LBFGS
-            logger.debug(f"LOSS_VALUES: Step {step} - Total: {loss_.item():.6f}, Recon: {recon_loss_.item():.6f}, Latent norm: {latent.norm().item():.6f}")
+        
+        # Log progress at reasonable intervals
+        if step % 50 == 0 or (step < 10):
+            logger.info(f"Step {step}: Loss={loss_.item():.6f}, Recon={recon_loss_.item():.6f}, Latent_norm={latent.norm().item():.3f}")
 
         # check if want to project onto hypersphere (skip for LBFGS since it's done in closure)
         # Only use hard projection if soft constraint is disabled
@@ -854,8 +774,7 @@ def reconstruct_latent(
                 patience += 1
 
             if patience > convergence_patience:
-                print("Converged!")
-                print("Step: ", step)
+                logger.info(f"Converged (overall_loss) after {step} steps! Final loss: {loss_.item():.6f}")
                 break
         elif convergence == "recon_loss":
             if recon_loss_ < recon_loss:
@@ -866,8 +785,7 @@ def reconstruct_latent(
                 patience += 1
 
             if patience > convergence_patience:
-                print("Converged!")
-                print("Step: ", step)
+                logger.info(f"Converged (recon_loss) after {step} steps! Final recon loss: {recon_loss_.item():.6f}")
                 break
         else:
             loss = loss_
