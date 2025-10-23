@@ -2,7 +2,7 @@
 This code uses generative deep learning models to understand the skeletal anatomy of lizards and some snakes (Squamata). This code is forked and modified from [gattia/NSM](https://github.com/gattia/NSM) following the terms of the [GNU Affero GPL 3.0 License](https://www.gnu.org/licenses/agpl-3.0.en.html). See [Original NSM Documentation](http://anthonygattiphd.com/NSM/). 
 
 ![Isomap GIF](https://github.com/aubricot/nsm/blob/main/images/isomap_4way_splitscreen_C-T-L_avg.gif)
-*Figure 1: Traversing an isomap of the NSM trained model latent space using travelling salesman and k-nearest neighbors.*
+*Figure 1: Traversing an isomap of the NSM trained model latent space using travelling salesman and k-nearest neighbors. Video animation made using [isomap_video.py](https://github.com/aubricot/nsm/blob/main/isomap_video.py)*
 
 # Installation
 
