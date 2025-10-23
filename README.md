@@ -115,4 +115,4 @@ mesh_pv.save(output_path)
 
 # License
 
-This code is forked and modified from [https://github.com/gattia/NSM](https://github.com/gattia/NSM) following the terms of the [GNU Affero GPL 3.0 License](https://www.gnu.org/licenses/agpl-3.0.en.html).
+This code is forked and modified from [https://github.com/gattia/NSM](https://github.com/gattia/NSM) following the terms of the [GNU Affero GPL 3.0 License](https://www.gnu.org/licenses/agpl-3.0.en.html) and [NSM License](https://github.com/gattia/nsm/blob/main/LICENSE).
