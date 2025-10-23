@@ -1,232 +1,118 @@
-![Build Status](https://github.com/gattia/NSM/actions/workflows/build-test.yml/badge.svg?branch=main)<br>
-|[Documentation](http://anthonygattiphd.com/NSM/)|
-
-
-
 # Introduction
-
-This pacakge is meant to develop generative deep learning models for creating human anatomy. The initial focus is on musculoskeletal tissues, particular of the knee. 
-
-Steps to update this package for new repository: 
-4. update `requirements.txt` and `dependencies` in `pyproject.toml`
-     - To do - can dependencies read/update from requirements.txt?
-
+This code is forked and modified from [gattia/NSM](https://github.com/gattia/NSM) following the terms of the [GNU Affero GPL 3.0 License](https://www.gnu.org/licenses/agpl-3.0.en.html). See [Original NSM Documentation](http://anthonygattiphd.com/NSM/). It is meant for using generative deep learning models to understand the skeletal anatomy of lizards and some snakes (Squamata). 
 
 # Installation
 
-## Standard Installation
-
 ```bash
 # Create and activate conda environment
-conda create -n nsm python=3.9
-conda activate nsm
+conda create -n NSM python=3.11
+conda activate NSM
 
-# Install PyTorch (ensure compatibility with your CUDA version if using GPU)
-# See: https://pytorch.org/get-started/locally/
-conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+# Install pytorch and dependencies
+conda install pytorch torchvision torchaudio pytorch-cuda -c pytorch -c nvidia
 
-# Install NSM package
-pip install -r requirements.txt
-pip install .
-```
-
-## Development Installation
-If you plan to contribute to the development of NSM, install it in editable mode. This means changes you make to the source code will be immediately reflected when you use the package.
-
-See [DEVELOPMENT.md](DEVELOPMENT.md) for detailed development setup instructions.
-
-Quick setup:
-```bash
-# Clone the repository
-git clone https://github.com/gattia/NSM
+# Install NSM
+mkdir NSM
 cd NSM
+git clone https://github.com/aubricot/nsm.git
+cd nsm
+python -m pip install -r requirements.txt
+pip install .
 
-# Create and activate conda environment
-conda create -n nsm-dev python=3.9
-conda activate nsm-dev
-
-# Install all dependencies and NSM in development mode
-make install-dev
 ```
 
 # Usage
 
-## Logging
-
-NSM uses Python's built-in `logging` module for debugging and monitoring. To enable logging output in your scripts:
-
-```python
-import logging
-
-# Basic logging setup (adjust level as needed)
-logging.basicConfig(
-    level=logging.INFO,  # or DEBUG for more verbose output
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-
-# For more detailed output from specific modules
-logging.getLogger('NSM.reconstruct.recon_evaluation').setLevel(logging.DEBUG)
+## Training
+Update sections of [train_model.py]() commented with # TO DO: to update PROJECT_NAME, ENTITY_NAME, RUN_NAME, folder_vtk, N_TRAIN, N_TEST, N_VAL. These variables point to where your data was collected, where it is saved, and where outputs should go. Adjust model training hyperparameters in [vertebrae_config.json](). See python script and config files for details and save before running using commands below. 
 ```
-
-### Logging Levels
-- **DEBUG**: Detailed information for debugging (mesh processing details, loss values)
-- **INFO**: General information about process flow  
-- **WARNING**: Potential issues (missing meshes, NaN values)
-- **ERROR**: Serious errors that may cause failures
-
-### Example with File Output
-```python
-import logging
-
-# Configure logging to both console and file
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('nsm_processing.log'),
-        logging.StreamHandler()  # Console output
-    ]
-)
+conda activate NSM
+cd NSM
+python train_model.py
 ```
 
 ## Model Loading
 
-NSM provides a convenient model loader that simplifies loading pre-trained Neural Shape Models. For **real trained models**, you'll typically have:
+NSM provides a convenient model loader that simplifies loading pre-trained Neural Shape Models. For **trained models**, you'll have:
 
 - `experiment_dir/model_params_config.json` - Configuration saved during training
 - `experiment_dir/model/2000.pth` - Model weights at epoch 2000
+- `experiment_dir/latent_codes/2000.pth` - Latent codes at epoch 2000
 
 ```python
-import json
-from NSM.models import load_model
+import json, torch
+from NSM.models import TriplanarDecoder
 
-# Load configuration from training
-with open('experiment_dir/model_params_config.json', 'r') as f:
-    config = json.load(f)
+# Load config file
+with open(config_path, 'r') as f:
+     config = json.load(f)
 
-# Load trained model
-model = load_model(
-    config=config,
-    path_model_state='experiment_dir/model/2000.pth',
-    model_type='triplanar'  # or 'deepsdf', 'two_stage', 'implicit'
-)
+# Get model weights and latent codes
+latent_ckpt = torch.load(LC_PATH, map_location=device)
+latent_codes = latent_ckpt['latent_codes']['weight'].detach().cpu()
 
-# Ready for inference!
+# Build model
+triplane_args = {
+    'latent_dim': config['latent_size'],
+    'n_objects': config['objects_per_decoder'],
+    'conv_hidden_dims': config['conv_hidden_dims'],
+    'conv_deep_image_size': config['conv_deep_image_size'],
+    'conv_norm': config['conv_norm'], 
+    'conv_norm_type': config['conv_norm_type'],
+    'conv_start_with_mlp': config['conv_start_with_mlp'],
+    'sdf_latent_size': config['sdf_latent_size'],
+    'sdf_hidden_dims': config['sdf_hidden_dims'],
+    'sdf_weight_norm': config['weight_norm'],
+    'sdf_final_activation': config['final_activation'],
+    'sdf_activation': config['activation'],
+    'sdf_dropout_prob': config['dropout_prob'],
+    'sum_sdf_features': config['sum_conv_output_features'],
+    'conv_pred_sdf': config['conv_pred_sdf'],
+}
+model = TriplanarDecoder(**triplane_args)
+model_ckpt = torch.load(MODEL_PATH, map_location=device)
+model.load_state_dict(model_ckpt['model'])
+device = config.get("device", "cuda:0")
+model.to(device)
 model.eval()
 ```
 
-### Supported Model Types
+## Create Meshes
 
-- `'triplanar'` - TriplanarDecoder for triplanar neural representations
-- `'deepsdf'` - Standard DeepSDF decoder  
-- `'two_stage'` - Two-stage decoder combining triplanar and MLP
-- `'implicit'` - ImplicitDecoder with modulated periodic activations
-
-### Configuration Templates
-
-Get template configurations with sensible defaults:
+After loading a trained model, you can generate meshes from manipulated/new latent vectors. The example below generates the mean mesh shape based on model training data.
 
 ```python
-from NSM.models import get_model_config_template, list_supported_models
+from NSM.mesh import create_mesh
+import pyvista as pv
 
-# See all supported model types
-print(list_supported_models())
-# ['triplanar', 'deepsdf', 'two_stage', 'implicit']
+# Get the mean of the latent codes
+latents_np = latent_codes.numpy()
+latent_mean = np.mean(latents_np, axis=0)
 
-# Get configuration template for any model type
-config = get_model_config_template('deepsdf')
-# Modify parameters as needed
-config['latent_size'] = 512
-config['layer_dimensions'] = [512, 512, 512, 256, 128]
+# Convert the mean latent code to a pytorch tensor
+new_latent = torch.tensor(new_latent_np, dtype=torch.float32).unsqueeze(0).to(device)
+
+# Create a mesh from the latent tensor
+mesh_out = create_mesh(
+            decoder=model, latent_vector=new_latent, n_pts_per_axis=n_pts_per_axis,
+            voxel_origin=voxel_origin, voxel_size=voxel_size, path_original_mesh=None,
+            offset=offset, scale=scale, icp_transform=icp_transform,
+            objects=objects, verbose=False, device=device
+)
+
+# Ensure mesh is PyVista Polydata (.vtk) 
+if isinstance(mesh_out, list):
+     mesh_out = mesh_out[0]
+
+if not isinstance(mesh_out, pv.PolyData):
+     mesh_pv = mesh_out.extract_geometry()
+else:
+     mesh_pv = mesh_out
+
+# Write to file
+mesh_pv.save(output_path)
 ```
-
-## Examples
-
-### Loading a Trained Model
-
-See [`examples/load_trained_model.py`](examples/load_trained_model.py) for a complete example:
-
-```bash
-# Run the example with your trained model
-python examples/load_trained_model.py /path/to/experiment_dir 2000 --model-type triplanar
-
-# See all options
-python examples/load_trained_model.py --help
-```
-
-# Development / Contributing
-
-## Quick Development Commands
-
-The project includes a Makefile for common development tasks:
-
-```bash
-# Run all tests
-make test
-
-# Run only model loader tests
-make test-loader
-
-# Run tests with coverage report
-make test-coverage
-
-# Format code with black
-make format
-
-# Check code style with flake8
-make lint
-
-# Clean up temporary files
-make clean
-```
-
-## Tests
-Run tests with pytest:
-
-```bash
-# Run all tests
-pytest
-
-# Run specific test modules
-pytest testing/NSM/models/                     # Model loader tests
-pytest testing/NSM/datasets/                   # Dataset tests (including multi-surface registration)
-
-# Run tests with verbose output
-pytest -v
-
-# Use Makefile shortcuts
-make test                                       # Run all tests
-make test-loader                               # Run only model loader tests
-```
-
-## Coverage
-Generate test coverage reports:
-```bash
-make test-coverage              # HTML + terminal report
-```
-
-## Contributing
-If you want to contribute, please read the documentation in `CONTRIBUTING.md` and see `DEVELOPMENT.md` for detailed development setup instructions.
-
-## Documentation
-
-Additional documentation can be found in the [`docs/`](docs/) folder:
-
-- [`docs/MULTI_SURFACE_REGISTRATION.md`](docs/MULTI_SURFACE_REGISTRATION.md) - Multi-surface registration functionality
-
-API documentation is planned for future development. Consider using `pdoc` for auto-generated docs:
-
-```bash
-# TODO: Set up documentation generation
-# pip install pdoc
-# pdoc --html --output-dir docs NSM
-```
-
-## TODO
-
-- [ ] **Add logging throughout the codebase**: Extend logging support to all major modules (training, model loading, mesh processing, etc.) following the pattern established in `NSM.reconstruct.recon_evaluation`
-
 
 # License
 
-This project is licensed under the terms of the license specified in the [LICENSE](LICENSE) file.
+This code is forked and modified from [https://github.com/gattia/NSM](https://github.com/gattia/NSM) following the terms of the [GNU Affero GPL 3.0 License](https://www.gnu.org/licenses/agpl-3.0.en.html).
