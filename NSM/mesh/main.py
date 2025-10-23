@@ -21,7 +21,8 @@ def scale_mesh_(mesh, scale=1.0, offset=(0.0, 0.0, 0.0), icp_transform=None, ver
     pts = mesh.point_coords * scale
     pts += offset
 
-    mesh.point_coords = pts
+    #mesh.point_coords = pts
+    mesh.points = pts # TO DO: KW changed 22 oct 25
 
     if icp_transform is not None:
         transform = vtk.vtkTransform()
@@ -317,7 +318,7 @@ def sdf_grid_to_mesh_vtk(
     # Wrap the output as PyVista mesh and create mskt mesh directly
     mesh = mskt.mesh.Mesh(mesh=fe.GetOutput())    
     if verbose:
-        print(f"Extracted mesh with {mesh.n_points} vertices and {mesh.n_faces} faces")
+        print(f"Extracted mesh with {mesh.n_points} vertices and {mesh.n_faces_strict} faces") # TO DO: KW changed from mesh.n_faces to mesh.n_faces_strict
         print("Creating final mesh object...")    
 
     return mesh
