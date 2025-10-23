@@ -79,7 +79,7 @@ def get_pts_center_and_scale(
         the bone only, and then scaling based on bone + cartilage
 
     Tests:
-        - Ensure returns tuple length 2
+        - Ensure returns tuple length 2F
         - Ensure center is np array of shape (3,)
         - Ensure scale is float
     """
@@ -282,12 +282,14 @@ def read_mesh_get_sampled_pts(
             scale_method=scale_method,
             return_pts=True,
         )
-        new_mesh.point_coords = new_pts
+        #new_mesh.point_coords = new_pts # TO DO: KW changed oct 25
+        new_mesh.points = new_pts
     else:
         print("Not scaling or centering mesh")
         scale = 1
         center = np.zeros(3)
-        new_pts = new_mesh.point_coords
+        #new_pts = new_mesh.point_coords # TO DO: KW changed oct 25
+        new_pts = new_mesh.points
 
     results["new_pts"] = [new_pts]
 
