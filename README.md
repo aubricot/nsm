@@ -8,11 +8,11 @@ This code uses generative deep learning models to understand the skeletal anatom
 
 ```bash
 # Create and activate conda environment
-conda create -n NSM python=3.11
+conda create -n NSM python=3.10
 conda activate NSM
 
 # Install pytorch and dependencies
-conda install pytorch torchvision torchaudio pytorch-cuda -c pytorch -c nvidia
+conda install pytorch=2.5.1 torchvision=0.20.1 torchaudio=2.5.1 pytorch-cuda=12.4 -c pytorch -c nvidia -c conda-forge -c defaults
 
 # Install NSM
 mkdir NSM
@@ -21,6 +21,7 @@ git clone https://github.com/aubricot/nsm.git
 cd nsm
 python -m pip install -r requirements.txt
 pip install .
+pip install mskt nibabel pandas scikit-learn scikit-image wandb
 
 ```
 
@@ -30,7 +31,7 @@ pip install .
 Update sections of [train_model.py]() commented with # TO DO: to update PROJECT_NAME, ENTITY_NAME, RUN_NAME, folder_vtk, N_TRAIN, N_TEST, N_VAL. These variables point to where your data was collected, where it is saved, and where outputs should go. Adjust model training hyperparameters in [vertebrae_config.json](). See python script and config files for details and save before running using commands below. 
 ```
 conda activate NSM
-cd NSM
+cd NSM/nsm
 python train_model.py
 ```
 
