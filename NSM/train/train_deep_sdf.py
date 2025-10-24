@@ -29,6 +29,7 @@ from NSM.train.utils import (
 )
 
 import wandb
+import csv
 import os
 import torch
 import time
@@ -67,7 +68,7 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
         config["resume_epoch"] = 0
 
     model = model.to(config["device"])
-
+    # Log training results across epochs
     if use_wandb is True:
         wandb.login(key=os.environ["WANDB_KEY"])
         wandb.init(
@@ -80,6 +81,11 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
             tags=config["tags"],
         )
         wandb.watch(model, log="all")
+    else: # to CSV file
+        cwd = config['experiment_directory']
+        log_fpath = os.path.split(cwd)[0] + "/train_logs/" + os.path.split(cwd)[1] + "_train_log.csv"
+        if not os.path.exists(os.path.split(cwd)[0] + "/train_logs/"):
+            os.makedirs(os.path.split(cwd)[0] + "/train_logs/")
 
     data_loader = torch.utils.data.DataLoader(
         sdf_dataset,
@@ -133,6 +139,7 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
     with get_profiler(config) as profiler:
 
         for epoch in range(config["resume_epoch"] + 1, config["n_epochs"] + 1):
+            print(f'\033[92m\n\n\nEpoch: {epoch}\033[0m')
             # not passing latent_vecs because presumably they are being tracked by the
             # and updated in memory?
             log_dict = train_epoch(
@@ -166,6 +173,7 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
                             model(batch)
 
             if checkpoint_epoch:
+                print("\nCheckpoint epoch...")
                 save_model_params(config=config, list_mesh_paths=sdf_dataset.list_mesh_paths)
 
                 save_latent_vectors(
@@ -176,6 +184,7 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
                 save_model(config=config, epoch=epoch, decoder=model, optimizer=optimizer)
 
             if val_epoch:
+                print("\nValidation epoch...")
                 clear_gpu_cache(config["device"])
 
                 # TODO: Change this to just accept the config?
@@ -185,7 +194,7 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
                     mesh_paths=config["val_paths"],
                     decoders=model,
                     num_iterations=config["num_iterations_recon"],
-                    register_similarity=True,
+                    register_similarity=True, # TO DO: Note KW switched to false from training error debugging with novel latent stuff
                     latent_size=config["latent_size"],
                     lr=config["lr_recon"],
                     # loss_weight
@@ -229,6 +238,15 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
                 )
 
                 log_dict.update(dict_loss)
+
+                # Write results to csv to track training progress
+                write_header = not os.path.exists(log_fpath)
+                with open(log_fpath, 'a', newline='') as csvfile:
+                    writer = csv.DictWriter(csvfile, fieldnames=log_dict.keys())
+                    if write_header:
+                        writer.writeheader()
+                        write_header = False
+                    writer.writerow(log_dict)
 
             if use_wandb is True:
                 wandb.log(log_dict, step=epoch - 1)
@@ -574,6 +592,7 @@ def train_epoch(
     print("\t save l1 losses: ", save_l1_losses)
 
     log_dict = {
+        "epoch": epoch,
         "loss": save_loss,
         "epoch_time_s": seconds_elapsed,
         "l1_loss": save_l1_loss,
@@ -590,11 +609,13 @@ def train_epoch(
     for l1_idx, l1_loss_ in enumerate(save_l1_losses):
         log_dict["l1_loss_{}".format(l1_idx)] = l1_loss_
 
-    if config["log_latent"] is not None:
+    if config["log_latent"] is not None: # TO DO: Double check in config and set to true to track latent metrics
         vecs = latent_vecs.weight.data.cpu().numpy()
         for latent_idx in range(config["log_latent"]):
-            log_dict[f"latent_{latent_idx}"] = wandb.Histogram(vecs[:, latent_idx])
-            log_dict[f"latent_{latent_idx}_mean"] = vecs[:, latent_idx].mean()
-            log_dict[f"latent_{latent_idx}_std"] = vecs[:, latent_idx].std()
+            latent_values = vecs[:, latent_idx]
+            log_dict[f'latent_{latent_idx}_mean'] = float(latent_values.mean()) # TO DO: KW changed this logging for csv approach instead of wandb
+            log_dict[f'latent_{latent_idx}_std'] = float(latent_values.std())
+            log_dict[f'latent_{latent_idx}_min'] = float(latent_values.min())
+            log_dict[f'latent_{latent_idx}_max'] = float(latent_values.max())
 
     return log_dict
