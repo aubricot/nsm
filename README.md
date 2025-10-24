@@ -21,7 +21,6 @@ git clone https://github.com/aubricot/nsm.git
 cd nsm
 python -m pip install -r requirements.txt
 pip install .
-pip install mskt nibabel pandas scikit-learn scikit-image wandb
 
 ```
 
