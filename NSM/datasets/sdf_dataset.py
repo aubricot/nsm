@@ -26,6 +26,36 @@ except ModuleNotFoundError:
 today_date = datetime.now().strftime("%b_%d_%Y")
 
 
+#===========Monkey patch from pymskt.mesh.meshes.py========
+from pymskt.mesh.meshTools import pcu_sdf, vtk_sdf
+def get_sdf_pts(self, pts, method="pcu"):
+        """
+        Calculates the signed distances (SDFs) for a set of points.
+
+        Args:
+            pts (np.ndarray): (n_pts, 3) array of points
+            method (str, optional): Method to use. Defaults to 'pcu' as its faster
+
+        Returns:
+            np.ndarray: (n_pts, ) array of SDFs
+        """
+        if method == "vtk":
+            sdfs = vtk_sdf(pts, self)
+        elif method == "pcu":
+            # use point-cloud-utils
+            # pcu is faster than vtk for large # of points
+            # Ensure pts are C-contiguous (default) for the call to 
+            # The fix for pcu internal error is in meshTools.py (asfortranarray for vertices)
+            
+            #sdfs = (np.ascontiguousarray(pts), self)
+            sdfs = pcu_sdf(pts, self)  # returns (N,) float array  # TO DO: KW Changed on 27 Oct 25, error training with atlas data run_v32
+        else:
+            raise ValueError(f"method {method} not recognized")
+
+        return sdfs
+#=====================
+
+
 def get_rand_uniform_pts(n_pts, mins=(-1, -1, -1), maxs=(1, 1, 1)):
     """
     Given a set of points, returns a set of points that are randomly sampled
@@ -1235,13 +1265,18 @@ class SDFSamples(torch.utils.data.Dataset):
 
                 if result_ is None:
                     return None
-
+                
+                ######
+                ## TO DO: KW modified 24 oct 25 training errors with new atlas outputs after runv32
                 xyz_ = result_["pts"] if "pts" in result_ else result_["xyz"]
                 sdfs_ = result_["sdf"] if "sdf" in result_ else result_["gt_sdf"]
+                if isinstance(sdfs_, tuple):
+                    sdfs_ = sdfs_[0]
 
                 data["xyz"][pts_idx : pts_idx + n_pts_, :] = torch.from_numpy(xyz_).float()
                 data["gt_sdf"][pts_idx : pts_idx + n_pts_] = torch.from_numpy(sdfs_).float()
                 pts_idx += n_pts_
+                ####
 
                 if idx_ == 0:
                     # Convert list of arrays to tensors
@@ -1572,6 +1607,7 @@ class SDFSamples(torch.utils.data.Dataset):
 
 
 class MultiSurfaceSDFSamples(SDFSamples):
+
     """
     Dataset class for sampling SDFs from multiple mesh surfaces with support for
     multi-surface rigid registration.
