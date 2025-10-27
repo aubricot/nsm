@@ -28,6 +28,7 @@ today_date = datetime.now().strftime("%b_%d_%Y")
 
 #===========Monkey patch from pymskt.mesh.meshes.py========
 from pymskt.mesh.meshTools import pcu_sdf, vtk_sdf
+from scipy.spatial import cKDTree
 def get_sdf_pts(self, pts, method="pcu"):
         """
         Calculates the signed distances (SDFs) for a set of points.
@@ -53,6 +54,48 @@ def get_sdf_pts(self, pts, method="pcu"):
             raise ValueError(f"method {method} not recognized")
 
         return sdfs
+
+def get_assd_mesh(self, other_mesh):
+        if isinstance(other_mesh, Mesh):
+            pass
+        elif isinstance(other_mesh, (vtk.vtkPolyData, pv.PolyData, str)):
+            other_mesh = Mesh(other_mesh)
+        else:
+            raise TypeError(
+                "other_mesh must be of type Mesh, vtk.vtkPolyData, pv.PolyData, or str, and received: {}".format(
+                    type(other_mesh)
+                )
+            )
+        ### TO DO: KW added 27 Oct 25 bc of error caluclating get_mean_errors of assd
+        pts1 = getattr(self, 'point_coords', None)
+        pts2 = getattr(other_mesh, 'point_coords', None)
+
+        if pts1 is None and hasattr(self, 'points'):
+            pts1 = np.asarray(self.points)
+        if pts2 is None and hasattr(other_mesh, 'points'):
+            pts2 = np.asarray(other_mesh.points)
+
+        pts1 = np.asarray(pts1)
+        pts2 = np.asarray(pts2)
+
+        # --- Compute symmetric nearest-neighbor distances ---
+        tree1 = cKDTree(pts1)
+        tree2 = cKDTree(pts2)
+
+        dists1, _ = tree1.query(pts2)  # distance from each vertex in mesh2 to mesh1
+        dists2, _ = tree2.query(pts1)  # distance from each vertex in mesh1 to mesh2
+
+        # --- Compute mean symmetric distance (ASSD) ---
+        assd = (np.mean(dists1) + np.mean(dists2)) / 2.0
+
+        #####
+
+        #distances1 = np.abs((self.point_coords, other_mesh)) # orig code doesnt actually calculate assd
+        #distances2 = np.abs((other_mesh.point_coords, self)) # orig code doesnt actually calculate assd
+
+        #assd = (np.sum(distances1) + np.sum(distances2)) / (len(distances1) + len(distances2)) # orig code doesnt actually calculate assd
+
+        return assd
 #=====================
 
 
