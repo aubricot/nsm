@@ -1,6 +1,6 @@
 from torch import nn
 import torch
-
+import copy
 from .triplanar import TriplanarDecoder
 from .deep_sdf import Decoder
 
@@ -61,6 +61,9 @@ class TwoStageDecoder(nn.Module):
         assert latent_size % 2 == 0, "latent_size must be even"
 
         self.n_objects = n_objects
+
+        triplanar_params = copy.deepcopy(triplanar_params)
+        mlp_params = copy.deepcopy(mlp_params)
 
         triplanar_params["latent_dim"] = self.model_latent_size
         triplanar_params["n_objects"] = self.n_objects

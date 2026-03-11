@@ -85,6 +85,7 @@ class VAEDecoder(nn.Module):
                 self.layers.append(norm)
 
             activation = activation_fn()
+            self.layers.append(activation_fn())
 
             # set in_channels for next loop.
             in_channels = out_channels
@@ -308,24 +309,45 @@ class TriplanarDecoder(nn.Module):
         )
 
         return sampled_feats.T
+    
+    def sample_plane_features_batched(self, query, plane_features, plane):
+        """
+        args:
+            query: (B, N, 3)
+            plane_features: (B, C, H, W)
+            plane: 'xz', 'yz', 'xy'
+        return:
+            sampled_feats: (B, N, C)
+        """
+        grid = self.normalize_coordinates(query, plane=plane)
+        sampled_feats = (
+            grid_sample(
+                input=plane_features,
+                grid=grid,
+                padding_mode="border",
+                align_corners=True,
+                mode="bilinear",
+            )
+            .squeeze(-1)
+            .transpose(1, 2)
+        )
+        return sampled_feats    
 
     def normalize_coordinates(self, query, plane, padding=0.1):
         if plane == "xy":
-            xy = query[:, [0, 1]]
+            xy = query[..., [0, 1]]
         elif plane == "xz":
-            xy = query[:, [0, 2]]
+            xy = query[..., [0, 2]]
         elif plane == "yz":
-            xy = query[:, [1, 2]]
+            xy = query[..., [1, 2]]
         else:
             raise ValueError("plane must be 'xy', 'xz', or 'yz'")
-
-        xy_new = xy / (1 + self.padding + 10e-6)
-        if xy_new.min() < -1:
-            xy_new[xy_new < -1] = -1
-        if xy_new.max() > 1:
-            xy_new[xy_new > 1] = 1
-
-        return xy_new[None, :, None, :]
+        xy_new = (xy / (1 + self.padding + 10e-6)).clamp(-1, 1)
+        if xy_new.dim() == 2:
+            return xy_new[None, :, None, :]
+        if xy_new.dim() == 3:
+            return xy_new[:, :, None, :]
+        raise ValueError("query must be a 2D or 3D tensor")
 
     def forward(self, x=None, latent=None, xyz=None, epoch=None, verbose=False):
         """
@@ -390,12 +412,37 @@ class TriplanarDecoder(nn.Module):
         # Feature computation
         per_unique_feats = self.vae_decoder(unique_latent)  # (U,C,H,W)
         
-        pts_latents = []
-        for idx in range(num_unique):
-            feats = per_unique_feats[idx]
-            pts = xyz[unique_indices == idx, :]
-            pts_latents.append(self.forward_with_plane_features(feats, pts))
-        plane_feats_for_points = torch.cat(pts_latents, dim=0)
+        # Vectorized fast path when each latent has equal point count.
+        counts = torch.bincount(unique_indices, minlength=num_unique)
+        if counts.numel() > 0 and torch.all(counts == counts[0]):
+            points_per_latent = int(counts[0].item())
+            sorted_order = torch.argsort(unique_indices)
+            inverse_order = torch.empty_like(sorted_order)
+            inverse_order[sorted_order] = torch.arange(sorted_order.shape[0], device=sorted_order.device)
+            xyz_grouped = xyz[sorted_order].view(num_unique, points_per_latent, 3)
+
+            latent_size = self.sdf_latent_size + self.conv_pred_sdf
+            feat_xz = per_unique_feats[:, :latent_size, ...]
+            feat_yz = per_unique_feats[:, latent_size : latent_size * 2, ...]
+            feat_xy = per_unique_feats[:, latent_size * 2 :, ...]
+
+            plane_feats_list = [
+                self.sample_plane_features_batched(xyz_grouped, feat_xz, "xz"),
+                self.sample_plane_features_batched(xyz_grouped, feat_yz, "yz"),
+                self.sample_plane_features_batched(xyz_grouped, feat_xy, "xy"),
+            ]
+            if self.sum_sdf_features:
+                grouped_feats = sum(plane_feats_list)
+            else:
+                grouped_feats = torch.cat(plane_feats_list, dim=2)
+            plane_feats_for_points = grouped_feats.reshape(-1, grouped_feats.shape[-1])[inverse_order]
+        else:
+            pts_latents = []
+            for idx in range(num_unique):
+                feats = per_unique_feats[idx]
+                pts = xyz[unique_indices == idx, :]
+                pts_latents.append(self.forward_with_plane_features(feats, pts))
+            plane_feats_for_points = torch.cat(pts_latents, dim=0)
 
         if self.conv_pred_sdf:
             low_freq_sdf = plane_feats_for_points[:, :1]
