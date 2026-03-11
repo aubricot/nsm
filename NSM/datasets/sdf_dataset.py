@@ -988,6 +988,7 @@ class SDFSamples(torch.utils.data.Dataset):
         if save_cache is True:
             self.cache_folder = os.path.join(self.loc_save, today_date)
             os.makedirs(self.cache_folder, exist_ok=True)
+        self._cache_index = self._build_cache_index()
 
         # get the combinations of points and sigmas to sample
         self.pt_sample_combos = self.get_pt_sample_combos()
@@ -1188,6 +1189,21 @@ class SDFSamples(torch.utils.data.Dataset):
             dict_pts[f"{pts_name}_0"] = data[pts_name]
         return dict_pts
 
+    def _build_cache_index(self):
+        cache_index = {}
+        if not os.path.exists(self.loc_save):
+            return cache_index
+        for p, _, f in os.walk(self.loc_save):
+            for filename_ in f:
+                if filename_.endswith(".npz"):
+                    cache_index[filename_] = os.path.join(p, filename_)
+        return cache_index
+
+    def _remove_cache_index_entry(self, path):
+        key = os.path.basename(path)
+        if key in self._cache_index:
+            self._cache_index.pop(key, None)
+
     def save_data_to_cache(self, data, file_hash, filepath=None):
         """
         Save the data to the cache.
@@ -1219,6 +1235,7 @@ class SDFSamples(torch.utils.data.Dataset):
         # add pos/negative point indices
 
         np.savez(filepath, pts=data["xyz"], sdfs=data["gt_sdf"], **dict_pts)
+        self._cache_index[os.path.basename(filepath)] = filepath
 
     def get_sample_data_dict(self, loc_mesh):
         """
@@ -1242,6 +1259,7 @@ class SDFSamples(torch.utils.data.Dataset):
                 if not is_zipfile(cached_file_):
                     print("DELETING BAD ZIP FILE:", cached_file_)
                     os.remove(cached_file_)
+                    self._remove_cache_index_entry(cached_file_)
                     continue
 
                 # if hashed file exists, load it.
@@ -1251,6 +1269,7 @@ class SDFSamples(torch.utils.data.Dataset):
                 except zipfile.BadZipFile:
                     print("DELETING BAD ZIP FILE:", cached_file_)
                     os.remove(cached_file_)
+                    self._remove_cache_index_entry(cached_file_)
                     continue
 
                 if ("pos_idx" not in data) or ("neg_idx" not in data) or ("surf_idx" not in data):
@@ -1398,15 +1417,21 @@ class SDFSamples(torch.utils.data.Dataset):
             list: List of paths to the hashed filename
         """
 
-        files = []
-        for p, d, f in os.walk(self.loc_save):
-            for filename_ in f:
-                if filename_ == filename:
-                    files.append(os.path.join(p, filename_))
-                    print("File found in cache:", files[-1])
-                    return files
+        if filename in self._cache_index:
+            path = self._cache_index[filename]
+            if os.path.exists(path):
+                print("File found in cache:", path)
+                return [path]
+            self._remove_cache_index_entry(path)
 
-        return files
+        # Fallback rebuild in case files changed externally.
+        self._cache_index = self._build_cache_index()
+        if filename in self._cache_index:
+            path = self._cache_index[filename]
+            print("File found in cache:", path)
+            return [path]
+
+        return []
 
     def load_reference_mesh(self):
         """
@@ -1823,6 +1848,7 @@ class MultiSurfaceSDFSamples(SDFSamples):
                 if not is_zipfile(cache_path):
                     print("DELETEING BAD ZIP FILE:", cache_path)
                     os.remove(cache_path)
+                    self._remove_cache_index_entry(cache_path)
                     continue
 
                 try:
@@ -1831,6 +1857,7 @@ class MultiSurfaceSDFSamples(SDFSamples):
                 except zipfile.BadZipFile:
                     print("DELETEING BAD ZIP FILE:", cache_path)
                     os.remove(cache_path)
+                    self._remove_cache_index_entry(cache_path)
                     continue
 
                 # if previous pre-processing not yet done, do it now
@@ -1862,6 +1889,7 @@ class MultiSurfaceSDFSamples(SDFSamples):
                     print("Indices out of range!", cache_path)
                     print("\tDeleting file...")
                     os.remove(cache_path)
+                    self._remove_cache_index_entry(cache_path)
                     break
 
                 if resave_data is True:
