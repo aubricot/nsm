@@ -36,7 +36,8 @@ import time
 import numpy as np
 import itertools
 import warnings
-
+import json
+from torch.cuda.amp import GradScaler, autocast
 
 DICT_VALIDATION_FUNCS = {
     "compare_cart_thickness": compare_cart_thickness,
@@ -59,6 +60,9 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
     config.setdefault("scale_jointly", False)
     config.setdefault("fix_mesh_recon", False)
     config.setdefault("log_latent", None)
+    config.setdefault("use_amp", False)
+    config.setdefault("n_val_eval", None)
+    config.setdefault("register_similarity_recon", False)
 
     config = add_plain_lr_to_config(config)
     config["checkpoints"] = get_checkpoints(config)
@@ -87,15 +91,19 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
         if not os.path.exists(os.path.split(cwd)[0] + "/train_logs/"):
             os.makedirs(os.path.split(cwd)[0] + "/train_logs/")
 
-    data_loader = torch.utils.data.DataLoader(
-        sdf_dataset,
-        batch_size=config["objects_per_batch"],
-        shuffle=True,
-        num_workers=config["num_data_loader_threads"],
-        drop_last=False,
-        prefetch_factor=config["prefetch_factor"],
-        pin_memory=True,
-    )
+    num_workers = int(config["num_data_loader_threads"])
+    data_loader_kwargs = {
+        "dataset": sdf_dataset,
+        "batch_size": config["objects_per_batch"],
+        "shuffle": True,
+        "num_workers": num_workers,
+        "drop_last": False,
+        "pin_memory": True,
+        "persistent_workers": num_workers > 0,
+    }
+    if num_workers > 0:
+        data_loader_kwargs["prefetch_factor"] = int(config.get("prefetch_factor", 2))
+    data_loader = torch.utils.data.DataLoader(**data_loader_kwargs)
 
     latent_vecs = get_latent_vecs(len(data_loader.dataset), config).to(config["device"])
     optimizer = get_optimizer(
@@ -105,6 +113,9 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
         optimizer=config["optimizer"],
         weight_decay=config["weight_decay"],
     )
+
+    use_amp = bool(config["use_amp"] and str(config["device"]).startswith("cuda"))
+    scaler = GradScaler(enabled=use_amp)
 
     if config["resume_epoch"] > 1:
         print("Loading model, optimizer, and latent states from epoch", config["resume_epoch"])
@@ -151,6 +162,8 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
                 epoch=epoch,
                 return_loss=True,
                 n_surfaces=config["objects_per_decoder"],
+                use_amp=use_amp,
+                scaler=scaler,
             )
             val_epoch = (
                 (epoch in config["checkpoints"])
@@ -187,14 +200,34 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
                 print("\nValidation epoch...")
                 clear_gpu_cache(config["device"])
 
+                val_mesh_paths = list(config["val_paths"])
+                n_val_eval = config.get("n_val_eval")
+                if (
+                    isinstance(n_val_eval, int)
+                    and n_val_eval > 0
+                    and len(val_mesh_paths) > n_val_eval
+                ):
+                    rng = np.random.default_rng(config.get("seed", 0) + epoch)
+                    sampled_idx = rng.choice(
+                        len(val_mesh_paths), size=n_val_eval, replace=False
+                    )
+                    mesh_paths_eval = [val_mesh_paths[i] for i in sorted(sampled_idx.tolist())]
+                else:
+                    mesh_paths_eval = val_mesh_paths
+                log_dict["n_val_total"] = len(val_mesh_paths)
+                log_dict["n_val_eval"] = len(mesh_paths_eval)
+                print(
+                    f"Validation meshes: {len(mesh_paths_eval)} / {len(val_mesh_paths)}"
+                )
+
                 # TODO: Change this to just accept the config?
                 # or... update all parameters to be the same in the config and the function call?
                 # this will just allow unpacking of the config dict.
                 dict_loss = get_mean_errors(
-                    mesh_paths=config["val_paths"],
+                    mesh_paths=mesh_paths_eval,
                     decoders=model,
                     num_iterations=config["num_iterations_recon"],
-                    register_similarity=True, # TO DO: Note KW switched to false from training error debugging with novel latent stuff
+                    register_similarity=config["register_similarity_recon"],
                     latent_size=config["latent_size"],
                     lr=config["lr_recon"],
                     # loss_weight
@@ -268,6 +301,8 @@ def train_epoch(
     return_loss=True,
     verbose=False,
     n_surfaces=2,
+    use_amp=False,
+    scaler=None,
 ):
     # n_surfaces = len(models)
     start = time.time()
@@ -279,13 +314,14 @@ def train_epoch(
     else:
         optimizer.train()
 
-    step_losses = 0
-    step_l1_loss = 0
-    step_code_reg_loss = 0
-    step_eikonal_loss = 0
-    step_l1_losses = [0.0 for _ in range(n_surfaces)]
-    step_mean_vec_length = 0
-    step_std_vec_length = 0
+    device = config["device"]
+    step_losses = torch.zeros((), device=device)
+    step_l1_loss = torch.zeros((), device=device)
+    step_code_reg_loss = torch.zeros((), device=device)
+    step_eikonal_loss = torch.zeros((), device=device)
+    step_l1_losses = [torch.zeros((), device=device) for _ in range(n_surfaces)]
+    step_mean_vec_length = torch.zeros((), device=device)
+    step_std_vec_length = torch.zeros((), device=device)
 
     # if config['code_regularization_type_prior'] == 'kld_diagonal':
     #     kld_loss = get_kld(latent_vecs)
@@ -295,31 +331,45 @@ def train_epoch(
     step_mean_load_rate = 0
     step_whole_load_time = 0
 
-    for sdf_data, indices in data_loader:
+    for batch_idx, (sdf_data, indices) in enumerate(data_loader):
+        batch_start = time.time()
+        # Some dataset modes (e.g., in-memory) don't attach I/O timing fields.
+        # Normalize missing keys so downstream logging never crashes.
+        if "size" not in sdf_data:
+            sdf_data["size"] = torch.zeros(1)
+        if "time" not in sdf_data:
+            sdf_data["time"] = torch.zeros(1)
+        if "mb_per_sec" not in sdf_data:
+            sdf_data["mb_per_sec"] = torch.zeros(1)
+        if "whole_load_time" not in sdf_data:
+            sdf_data["whole_load_time"] = torch.zeros(1)
+
         if config["verbose"] is True:
             print("sdf index size:", indices.size())
             print("xyz data size:", sdf_data["xyz"].size())
             print("sdf gt size:", sdf_data["gt_sdf"].size())
 
-        xyz = sdf_data["xyz"].to(config["device"])
+        xyz = sdf_data["xyz"].to(device, non_blocking=True)
         xyz = xyz.reshape(-1, 3)
 
         num_sdf_samples = xyz.shape[0]
         xyz.requires_grad = False
 
-        indices = indices.to(config["device"])
+        indices = indices.to(device, non_blocking=True)
+        n_objects_batch = int(indices.shape[0])
+        transfer_end = time.time()
 
         sdf_gt = []
         if n_surfaces == 1:
             # Handle the case where there is only one surface
-            sdf_gt_ = sdf_data["gt_sdf"].reshape(-1, 1)
+            sdf_gt_ = sdf_data["gt_sdf"].to(device, non_blocking=True).reshape(-1, 1)
             if config["enforce_minmax"] is True:
                 sdf_gt_ = torch.clamp(sdf_gt_, -config["clamp_dist"], config["clamp_dist"])
             sdf_gt_.requires_grad = False
             sdf_gt.append(sdf_gt_)
         else:
             for surf_idx in range(n_surfaces):
-                sdf_gt_ = sdf_data["gt_sdf"][:, :, surf_idx].reshape(-1, 1)
+                sdf_gt_ = sdf_data["gt_sdf"][:, :, surf_idx].to(device, non_blocking=True).reshape(-1, 1)
                 if config["enforce_minmax"] is True:
                     sdf_gt_ = torch.clamp(sdf_gt_, -config["clamp_dist"], config["clamp_dist"])
                 sdf_gt_.requires_grad = False
@@ -346,15 +396,17 @@ def train_epoch(
             print(f"len sdf_gt chunks: {[len(x_) for x_ in sdf_gt]}")
             print("len xyz chunks", len(xyz))
 
-        batch_loss = 0.0
-        batch_l1_loss = 0.0
-        batch_l1_losses = [0.0 for _ in range(n_surfaces)]
-        batch_code_reg_loss = 0.0
-        batch_eikonal_loss = 0.0
+        batch_loss = torch.zeros((), device=device)
+        batch_l1_loss = torch.zeros((), device=device)
+        batch_l1_losses = [torch.zeros((), device=device) for _ in range(n_surfaces)]
+        batch_code_reg_loss = torch.zeros((), device=device)
+        batch_eikonal_loss = torch.zeros((), device=device)
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
+        split_compute_time = 0.0
 
         for split_idx in range(config["batch_split"]):
+            split_start = time.time()
             if config["verbose"] is True:
                 print("Split idx: ", split_idx)
 
@@ -366,46 +418,44 @@ def train_epoch(
                 err = torch.randn_like(std)
                 batch_vecs = std * err + mu
 
-            inputs = torch.cat([batch_vecs, xyz[split_idx]], dim=1)
-            # inputs = inputs.to(config['device'])
+            with autocast(enabled=use_amp):
+                inputs = torch.cat([batch_vecs, xyz[split_idx]], dim=1)
 
-            if config["verbose"] is True:
-                print("model dtype", next(model.parameters()).dtype)
-                print("inputs dtype", inputs.dtype)
-            # pred_sdfs = []
-            # for model in models:
-            pred_sdf = model(inputs, epoch=epoch)
-
-            if n_surfaces == 1:
-                # Ensure pred_sdf is 2D even for single surface
-                if pred_sdf.dim() == 2 and pred_sdf.shape[1] == 1:
-                    pass  # Already correct shape
-                else:
-                    pred_sdf = pred_sdf.unsqueeze(1)  # Add surface dimension if needed
-
-            if config["enforce_minmax"] is True:
-                pred_sdf = torch.clamp(pred_sdf, -config["clamp_dist"], config["clamp_dist"])
-            # elif config['hard_sample_difficulty_weight'] is not None:
-            #     pred_sdf = torch.clamp(pred_sdf, -1, 1)
-
-            if config["verbose"] is True:
-                print("len pred_sdf", pred_sdf.shape)
-                print("split idx", split_idx)
-            l1_losses = []
-            for surf_idx in range(n_surfaces):
                 if config["verbose"] is True:
-                    print("surf idx", surf_idx)
-                    print(len(sdf_gt))
-                    print(len(sdf_gt[surf_idx]))
-                    print("pred_sdf shape", pred_sdf.shape)
-                    print("unsqueezed pred_sdf shape", pred_sdf[:, surf_idx].shape)
-                    print("sdf_gt shape", sdf_gt[surf_idx][split_idx].shape)
-                l1_losses.append(
-                    loss_l1(
-                        pred_sdf[:, surf_idx],
-                        sdf_gt[surf_idx][split_idx].squeeze(1).to(config["device"]),
+                    print("model dtype", next(model.parameters()).dtype)
+                    print("inputs dtype", inputs.dtype)
+                pred_sdf = model(inputs, epoch=epoch)
+
+                if n_surfaces == 1:
+                    # Ensure pred_sdf is 2D even for single surface
+                    if pred_sdf.dim() == 2 and pred_sdf.shape[1] == 1:
+                        pass  # Already correct shape
+                    else:
+                        pred_sdf = pred_sdf.unsqueeze(1)  # Add surface dimension if needed
+
+                if config["enforce_minmax"] is True:
+                    pred_sdf = torch.clamp(pred_sdf, -config["clamp_dist"], config["clamp_dist"])
+                # elif config['hard_sample_difficulty_weight'] is not None:
+                #     pred_sdf = torch.clamp(pred_sdf, -1, 1)
+
+                if config["verbose"] is True:
+                    print("len pred_sdf", pred_sdf.shape)
+                    print("split idx", split_idx)
+                l1_losses = []
+                for surf_idx in range(n_surfaces):
+                    if config["verbose"] is True:
+                        print("surf idx", surf_idx)
+                        print(len(sdf_gt))
+                        print(len(sdf_gt[surf_idx]))
+                        print("pred_sdf shape", pred_sdf.shape)
+                        print("unsqueezed pred_sdf shape", pred_sdf[:, surf_idx].shape)
+                        print("sdf_gt shape", sdf_gt[surf_idx][split_idx].shape)
+                    l1_losses.append(
+                        loss_l1(
+                            pred_sdf[:, surf_idx],
+                            sdf_gt[surf_idx][split_idx].squeeze(1),
+                        )
                     )
-                )
 
             if config.get("multi_object_overlap", False) == True:
                 raise Exception("Not implemented yet")
@@ -447,9 +497,9 @@ def train_epoch(
                     # so, if hard for one surface - then we weight it heavily, but if
                     # easy for another surface - then we weight it less.
                     error_sign = torch.sign(
-                        surf_gt_[split_idx].squeeze(1).to(config["device"]) - pred_sdf[:, surf_idx]
+                        surf_gt_[split_idx].squeeze(1) - pred_sdf[:, surf_idx]
                     )
-                    sdf_gt_sign = torch.sign(surf_gt_[split_idx].squeeze(1).to(config["device"]))
+                    sdf_gt_sign = torch.sign(surf_gt_[split_idx].squeeze(1))
                     sample_weights = 1 + difficulty_weight * sdf_gt_sign * error_sign
                     l1_losses[surf_idx] = l1_losses[surf_idx] * sample_weights
 
@@ -460,7 +510,7 @@ def train_epoch(
 
             # Comput total loss for each mesh (which is the same as the
             # mean).
-            l1_loss = 0
+            l1_loss = torch.zeros((), device=device)
 
             # Create weights for each surface
             if isinstance(config.get("surface_weighting", None), (list, tuple)):
@@ -485,21 +535,19 @@ def train_epoch(
                 print(f"l1 losses: {[l1_loss_.sum().item() for l1_loss_ in l1_losses]}")
                 print(f"l1 loss: {l1_loss.item()}")
 
-            batch_l1_loss += l1_loss.item()
+            batch_l1_loss += l1_loss.detach()
             for l1_idx, l1_loss_ in enumerate(l1_losses):
-                batch_l1_losses[l1_idx] += l1_loss_.sum().item()
+                batch_l1_losses[l1_idx] += l1_loss_.sum().detach()
             chunk_loss = l1_loss
 
             # Add eikonal loss if enabled
-            eikonal_loss_value = 0
             if config.get("eikonal_weight", 0) > 0:
                 # Recompute SDF with gradients for eikonal loss
                 xyz_grad = xyz[split_idx].detach().requires_grad_(True)
                 inputs_grad = torch.cat([batch_vecs, xyz_grad], dim=1)
                 pred_sdf_grad = model(inputs_grad, epoch=epoch)
                 eik_loss = eikonal_loss(pred_sdf_grad, xyz_grad, reduction="mean")
-                eikonal_loss_value = eik_loss.item()
-                batch_eikonal_loss += eikonal_loss_value
+                batch_eikonal_loss += eik_loss.detach()
                 chunk_loss = chunk_loss + config["eikonal_weight"] * eik_loss
 
             if config["code_regularization"] is True:
@@ -538,15 +586,19 @@ def train_epoch(
                     anneal_weight = cyclic_anneal_linear(epoch=epoch, n_epochs=config["n_epochs"])
                     reg_loss = reg_loss * anneal_weight
 
-                chunk_loss = chunk_loss + reg_loss.to(config["device"])
-                batch_code_reg_loss += reg_loss.item()
+                chunk_loss = chunk_loss + reg_loss.to(device)
+                batch_code_reg_loss += reg_loss.detach()
 
             mean_vec_length = torch.mean(torch.norm(batch_vecs, dim=1))
             std_vec_length = torch.std(torch.norm(batch_vecs, dim=1))
 
-            chunk_loss.backward()
+            if scaler is not None and use_amp:
+                scaler.scale(chunk_loss).backward()
+            else:
+                chunk_loss.backward()
+            split_compute_time += time.time() - split_start
 
-            batch_loss += chunk_loss.item()
+            batch_loss += chunk_loss.detach()
 
         step_losses += batch_loss
         step_l1_loss += batch_l1_loss
@@ -555,29 +607,44 @@ def train_epoch(
         for l1_idx, l1_loss_ in enumerate(batch_l1_losses):
             step_l1_losses[l1_idx] += l1_loss_  # l1_loss_
 
-        step_mean_vec_length = mean_vec_length.item()
-        step_std_vec_length = std_vec_length.item()
+        step_mean_vec_length += mean_vec_length.detach()
+        step_std_vec_length += std_vec_length.detach()
 
         if config["grad_clip"] is not None:
+            if scaler is not None and use_amp:
+                scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), config["grad_clip"])
 
-        step_mean_size += torch.mean(sdf_data["size"]).item()
-        step_mean_load_time += torch.mean(sdf_data["time"]).item()
-        step_mean_load_rate += torch.mean(sdf_data["mb_per_sec"]).item()
-        step_whole_load_time += torch.mean(sdf_data["whole_load_time"]).item()
+        if "size" in sdf_data:
+            step_mean_size += torch.mean(sdf_data["size"]).item()
+        if "time" in sdf_data:
+            step_mean_load_time += torch.mean(sdf_data["time"]).item()
+        if "mb_per_sec" in sdf_data:
+            step_mean_load_rate += torch.mean(sdf_data["mb_per_sec"]).item()
+        if "whole_load_time" in sdf_data:
+            step_whole_load_time += torch.mean(sdf_data["whole_load_time"]).item()
 
-        optimizer.step()
+        optimizer_start = time.time()
+        if scaler is not None and use_amp:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+        optimizer_time = time.time() - optimizer_start
+
+        batch_total = time.time() - batch_start
+
     end = time.time()
 
     seconds_elapsed = end - start
 
-    save_loss = step_losses / len(data_loader)
-    save_l1_loss = step_l1_loss / len(data_loader)
-    save_code_reg_loss = step_code_reg_loss / len(data_loader)
-    save_eikonal_loss = step_eikonal_loss / len(data_loader)
-    save_l1_losses = [l1_loss_ / len(data_loader) for l1_loss_ in step_l1_losses]
-    save_mean_vec_length = step_mean_vec_length / len(data_loader)
-    save_std_vec_length = step_std_vec_length / len(data_loader)
+    save_loss = (step_losses / len(data_loader)).item()
+    save_l1_loss = (step_l1_loss / len(data_loader)).item()
+    save_code_reg_loss = (step_code_reg_loss / len(data_loader)).item()
+    save_eikonal_loss = (step_eikonal_loss / len(data_loader)).item()
+    save_l1_losses = [(l1_loss_ / len(data_loader)).item() for l1_loss_ in step_l1_losses]
+    save_mean_vec_length = (step_mean_vec_length / len(data_loader)).item()
+    save_std_vec_length = (step_std_vec_length / len(data_loader)).item()
 
     save_mean_size = step_mean_size / len(data_loader)
     save_mean_load_time = step_mean_load_time / len(data_loader)
