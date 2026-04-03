@@ -159,7 +159,7 @@ def downsample_partial_pointcloud(mesh_path, n_points=5000, voxel_fraction=0.01,
     voxel_size = max(diag * voxel_fraction, 1e-5)  # ensure nonzero voxel size
     pcd_down = pcd.voxel_down_sample(voxel_size=voxel_size)
     pts = np.asarray(pcd_down.points)
-    print(f"Downsampled from {len(mesh_pv.points)} → to {len(pts)} points (voxel={voxel_size:.4f})")
+    print(f"Downsampled from {len(mesh_pv.points)} -> to {len(pts)} points (voxel={voxel_size:.4f})")
     return pts
 
 # Optimize latent from partial pointcloud (model has no encoder, so need to optimize before feeding in new data)
