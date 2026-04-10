@@ -62,7 +62,10 @@ def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_p
         print(f"\033[32m\n=== Processing {os.path.basename(vert_fname)} ===\033[0m")
         print(f"\033[32m\n=== Mesh {i+1} / {len(mesh_list)} ===\033[0m")
         # Make a new dir to save predictions
-        outfpath = 'shape_completion/predictions/' + os.path.splitext(os.path.basename(vert_fname))[0] # TO DO: Adjust to desired outpath
+        if output_folder_path is not None:
+            outfpath = output_folder_path
+        else:
+            outfpath = 'shape_completion/predictions/' + os.path.splitext(os.path.basename(vert_fname))[0] # TO DO: Adjust to desired outpath
         print("Making a new directory to save model predictions and outputs at: ", outfpath)
         os.makedirs(outfpath, exist_ok=True)
 
@@ -155,7 +158,7 @@ def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_p
         mesh_pv.save(output_path)
         print(f"Completed mesh from partial pointcloud saved to: {output_path}")
 
-        with open(os.path.join(outfpath, ".done"), "w") as f:
+        with open(os.path.join(outfpath, os.path.splitext(os.path.basename(vert_fname))[0] + ".done"), "w") as f:
             f.write(output_path)
 
 if __name__ == "__main__":

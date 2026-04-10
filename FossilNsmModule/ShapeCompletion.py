@@ -21,7 +21,6 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
         super().setup()
 
         ShapeCompletionLogic.installDependenciesIfNeeded()
-        # _importDependencies()
 
         # Form Layout
         inputCollapsible = ctk.ctkCollapsibleButton()
@@ -86,6 +85,54 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
         self.statusLog.setReadOnly(True)
         self.statusLog.setFixedHeight(120)
         self.layout.addWidget(self.statusLog)
+
+        # Similarity Metrics Form Layout
+        distanceCollapsible = ctk.ctkCollapsibleButton()
+        distanceCollapsible.text = "Similarity Metrics"
+        self.layout.addWidget(distanceCollapsible)
+        distanceLayout = qt.QFormLayout(distanceCollapsible)
+
+        self.sampleCountLabel = qt.QLabel("Point Sampled: ")
+        self.sampleCountValueInput = qt.QLineEdit(10000)
+        self.similarityThresholdLabel = qt.QLabel("Similarity Threshold: ")
+        self.similarityThresholdValueInput = qt.QLineEdit(0.005)
+        self.sampleCountValueInput.setFixedWidth(80)
+        self.similarityThresholdValueInput.setFixedWidth(80)
+        self.calculateDistsButton = qt.QPushButton("Calculate")
+        self.calculateDistsButton.setEnabled(False)
+        self.calculateDistsButton.connect("clicked(bool)", self.onCalculateDistances)
+
+        distanceInputRowWidget = qt.QWidget()
+        distanceInputRowLayout = qt.QHBoxLayout(distanceInputRowWidget)
+        distanceInputRowLayout.setContentsMargins(0, 0, 0, 0)
+        distanceInputRowLayout.addWidget(self.sampleCountLabel)
+        distanceInputRowLayout.addWidget(self.sampleCountValueInput)
+        distanceInputRowLayout.addSpacing(40)
+        distanceInputRowLayout.addWidget(self.similarityThresholdLabel)
+        distanceInputRowLayout.addWidget(self.similarityThresholdValueInput)
+        distanceInputRowLayout.addSpacing(40)
+        distanceInputRowLayout.addWidget(self.calculateDistsButton)
+        distanceLayout.addRow(distanceInputRowWidget)
+
+        self.chamferDistance = qt.QLabel("Chamfer Distance: ")
+        self.chamferDistanceValue = qt.QLabel("0.0")
+        distanceLayout.addRow(self.chamferDistance, self.chamferDistanceValue)
+
+        self.averageSymmetricSurfaceDistance = qt.QLabel("Average Symmetric Surface Distance: ")
+        self.averageSymmetricSurfaceDistanceValue = qt.QLabel("0.0")
+        distanceLayout.addRow(self.averageSymmetricSurfaceDistance, self.averageSymmetricSurfaceDistanceValue)
+
+        self.fScore = qt.QLabel("F-Score: ")
+        self.fScoreValue = qt.QLabel("0.0")
+        distanceLayout.addRow(self.fScore, self.fScoreValue)
+
+        self.precision = qt.QLabel("Precision: ")
+        self.precisionValue = qt.QLabel("0.0")
+        distanceLayout.addRow(self.precision, self.precisionValue)
+
+        self.recall = qt.QLabel("Recall: ")
+        self.recallValue = qt.QLabel("0.0")
+        distanceLayout.addRow(self.recall, self.recallValue)
 
         self.layout.addStretch(1)
 
@@ -155,7 +202,8 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
         self.onLogMessage("Starting inference...")
 
         base = os.path.splitext(os.path.basename(self.inputFilePath))[0]
-        self._resultPath = os.path.join(self.outputFolderPath, base, ".done")
+        self._resultPath = self.outputFolderPath + '/' + base + ".done"
+        self.onLogMessage("Result path: " + self._resultPath)
 
         # Path to the worker script (lives next to this module)
         workerScript = os.path.join(os.path.dirname(os.path.dirname(__file__)), "shape_completion.py")
@@ -164,7 +212,7 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
         pythonExe = sys.executable
 
         # Redirect stdout to a log file instead of a pipe
-        self._logFilePath = os.path.join(self.outputFolderPath, base, "shape_completion_worker_log.txt")
+        self._logFilePath = os.path.join(self.outputFolderPath, base, "shape_completion_log.txt")
         os.makedirs(os.path.dirname(self._logFilePath), exist_ok=True)
         self._logFile = open(self._logFilePath, "w")
         self._logReadPos = 0
@@ -183,6 +231,26 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
         self._pollTimer.setInterval(500)
         self._pollTimer.timeout.connect(self._pollSubprocess)
         self._pollTimer.start()
+
+    # Chamfer, ASSD, F-Score, Precision, Recall
+    def onCalculateDistances(self):
+        import pyvista as pv
+        from utils.utils import _uniform_surface_sample, chamfer_distance, f_score, ave_sym_surface_distance
+        
+        mp = pv.read(self.outputPath).triangulate().extract_geometry()
+        gt = pv.read(self.inputFilePath).triangulate().extract_geometry()
+        # Sample points across surface
+        sp = _uniform_surface_sample(mp, int(self.sampleCountValueInput.text))
+        sg = _uniform_surface_sample(gt, int(self.sampleCountValueInput.text))
+
+        chamfer = chamfer_distance(sg, sp)
+        fscore, precision, recall = f_score(sg, sp, d=float(self.similarityThresholdValueInput.text))
+        assd = ave_sym_surface_distance(sg, sp)
+        self.chamferDistanceValue.setText(f"{chamfer:.6f}")
+        self.averageSymmetricSurfaceDistanceValue.setText(f"{assd:.6f}")
+        self.fScoreValue.setText(f"{fscore:.6f}")
+        self.precisionValue.setText(f"{precision:.6f}")
+        self.recallValue.setText(f"{recall:.6f}")
 
     def _pollSubprocess(self):
         # Read any new lines from the log file (never blocks)
@@ -208,13 +276,14 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
 
             if retcode == 0 and os.path.exists(self._resultPath):
                 with open(self._resultPath) as f:
-                    outputPath = f.read().strip()
-                self.onLogMessage(f"Inference complete: {outputPath}")
-                outputNode = slicer.util.loadModel(outputPath)
+                    self.outputPath = f.read().strip()
+                self.onLogMessage(f"Inference complete: {self.outputPath}")
+                outputNode = slicer.util.loadModel(self.outputPath)
                 outputNode.SetName("Predicted Mesh")
                 slicer.app.layoutManager().threeDWidget(0).threeDView().resetFocalPoint()
+                self.calculateDistsButton.setEnabled(True)
             else:
-                self.onLogMessage(f"Inference failed (exit code {retcode})")
+                self.onLogMessage(f"Inference failed (exit code {retcode}, file exists: {os.path.exists(self._resultPath)} at {self._resultPath})")
 
     def onLogMessage(self, message):
         self.statusLog.appendPlainText(message)
