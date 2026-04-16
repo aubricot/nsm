@@ -73,7 +73,10 @@ from NSM.helper_funcs import (
     convert_ply_to_vtk, get_sdfs, fixed_point_coords,
     safe_load_mesh_scalars,
 )
-from NSM.optimization import pca_initialize_latent, get_top_k_pcs, find_similar, find_similar_cos
+from NSM.optimization import (
+    pca_initialize_latent, get_top_k_pcs, find_similar, find_similar_cos,
+    optimize_latent,
+)
 from .classifiers import (
     train_classifiers, predict_classifiers,
     train_position_regressors, predict_position_regressors,
@@ -245,28 +248,6 @@ def main():
     print(f"\n{'='*60}")
     print(f"Ablation run directory: {run_dir}")
     print(f"{'='*60}\n")
-
-
-    # ======================================================================
-    # Helper: optimize latent vector for a novel mesh
-    # ======================================================================
-    def optimize_latent(decoder, points, sdf_vals, latent_size, mean_latent,
-                        latent_codes, top_k_reg, device, iters=1000, lr=1e-3):
-        init_latent_torch = pca_initialize_latent(mean_latent, latent_codes, top_k=top_k_reg)
-        latent = init_latent_torch.clone().detach().float().to(device).requires_grad_()
-        optimizer = torch.optim.Adam([latent], lr=lr)
-        sdf_vals = sdf_vals.float().to(device)
-        decoder = decoder.to(device)
-        points = points.float().to(device)
-        for i in range(iters):
-            optimizer.zero_grad()
-            pred_sdf = get_sdfs(decoder, points, latent, device=device)
-            loss = F.l1_loss(pred_sdf.squeeze(), sdf_vals)
-            loss.backward()
-            optimizer.step()
-            if i % 200 == 0 or i == iters - 1:
-                print(f"[{i}/{iters}] Loss: {loss.item():.6f}")
-        return latent.detach().to(device)
 
 
     # ======================================================================
@@ -472,7 +453,7 @@ def main():
         # --- Optimize latent (done once per mesh, shared across all configs) ---
         print("Optimizing latent vector...")
         latent_novel = optimize_latent(model, points, sdf_vals, config['latent_size'],
-                                       mean_latent, latent_codes, top_k_reg, device=device)
+                                       top_k_reg, mean_latent, latent_codes, device=device)
         novel_vec_raw = latent_novel.cpu().detach().float().numpy()
         print("Latent optimization complete.")
 
