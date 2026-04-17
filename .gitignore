@@ -1,0 +1,15 @@
+alignedLMs/  
+exclu/
+vertebrae_meshes/*.vtk
+/vertebrae_meshes*
+/build*
+__pycache__/
+*/__pycache__/
+/original_data_unaligned_unscaled/
+*.pyc
+run_v56/
+run_v57/
+hierarchy_v1/
+literature/
+.DS_Store
+reports/
