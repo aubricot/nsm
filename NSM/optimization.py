@@ -165,7 +165,7 @@ def downsample_partial_pointcloud(mesh_path, n_points=5000, voxel_fraction=0.01,
 # Optimize latent from partial pointcloud (model has no encoder, so need to optimize before feeding in new data)
 def optimize_latent_partial(decoder, partial_pts, sdfs, latent_dim, mean_latent=None, latent_init=None, iters=2000, 
                             lr=1e-4, lambda_reg=1e-4, clamp_val=None, latent_std=None, scheduler_step=1000, scheduler_gamma=0.5, 
-                            top_k=200, batch_inference_size=32768, verbose=True, device='cuda', multi_stage=False):
+                            top_k=200, batch_inference_size=32768, verbose=True, device='cuda', multi_stage=False, l2_loss=False):
     decoder = decoder.to(device)
     decoder.eval()
     if isinstance(partial_pts, np.ndarray):
@@ -197,9 +197,12 @@ def optimize_latent_partial(decoder, partial_pts, sdfs, latent_dim, mean_latent=
         # Evaluate predicted SDFs in mini-batches to save memory
         preds = get_sdfs(decoder, partial_pts, latent, batch_size=batch_inference_size, device=device)  # (N,1)
         # surface loss (absolute SDF near 0)
-        sdf_loss = F.l1_loss(preds.to(device), target)
+        if l2_loss:
+            sdf_loss = F.mse_loss(preds.to(device), target)
+        else:
+            sdf_loss = F.l1_loss(preds.to(device), target)
         # latent prior: encourage closeness to mean_latent
-        reg_loss = torch.mean((latent - mean_latent.to(device)) ** 2)
+        reg_loss = F.mse_loss(latent, mean_latent.to(device))
         loss = sdf_loss + lambda_reg * reg_loss
         loss.backward()
         # gradient clipping and step
