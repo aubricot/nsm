@@ -17,6 +17,8 @@
 # species, genus, and spinal position.
 # =======================
 
+import argparse
+import sys
 import torch
 import numpy as np
 import json
@@ -67,7 +69,58 @@ meshTools.pcu.signed_distance_to_mesh = new_sdf_fn
 loss_l1 = torch.nn.L1Loss(reduction="none")
 
 
+def _pick_next_run_name(base: str = "hierarchy_v") -> str:
+    """Return `hierarchy_v<N>` where N is one higher than the largest
+    existing `hierarchy_v<int>` directory in CWD, or `hierarchy_v1` if none."""
+    nums = []
+    for entry in os.listdir('.'):
+        if os.path.isdir(entry) and entry.startswith(base):
+            suffix = entry[len(base):]
+            if suffix.isdigit():
+                nums.append(int(suffix))
+    next_n = max(nums) + 1 if nums else 1
+    return f"{base}{next_n}"
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Train NSM with hierarchy-aware loss. CLI args override "
+                    "values in vertebrae_config.json."
+    )
+    parser.add_argument('--run-name', type=str, default=None,
+                        help='Override the auto-incremented hierarchy_v<N> run directory.')
+    # Hierarchy contrastive loss
+    parser.add_argument('--contrastive-weight', type=float, default=None,
+                        help='Weight on the hierarchy contrastive loss (default 0.01).')
+    parser.add_argument('--contrastive-warmup', type=int, default=None,
+                        help='Warmup epochs before contrastive loss reaches full weight (default 200).')
+    # Classification heads
+    parser.add_argument('--head-weight', type=float, default=None,
+                        help='Weight on the classification-head loss (default 0.005).')
+    parser.add_argument('--head-warmup', type=int, default=None,
+                        help='Warmup epochs for classification head loss (default 100).')
+    parser.add_argument('--head-hidden-dim', type=int, default=None,
+                        help='Hidden dim of the classification heads (default 256).')
+    # Per-level weights inside classification head loss
+    parser.add_argument('--species-weight', type=float, default=None,
+                        help='Weight on species-level head loss (default 1.0).')
+    parser.add_argument('--genus-weight', type=float, default=None,
+                        help='Weight on genus-level head loss (default 0.5).')
+    parser.add_argument('--family-weight', type=float, default=None,
+                        help='Weight on family-level head loss (default 0.25).')
+    parser.add_argument('--position-weight', type=float, default=None,
+                        help='Weight on spinal-position head loss (default 0.75).')
+    # Disable switches
+    parser.add_argument('--no-contrastive', action='store_true',
+                        help='Disable hierarchy contrastive loss entirely.')
+    parser.add_argument('--no-heads', action='store_true',
+                        help='Disable classification heads entirely.')
+    return parser
+
+
 def main():
+
+    args = _build_arg_parser().parse_args()
 
     # ======================================================================
     # Configuration
@@ -76,7 +129,8 @@ def main():
     USE_WANDB = False
     PROJECT_NAME = 'Classification_Hierarchy'  # TO DO: change name
     ENTITY_NAME = 'GATECH'
-    RUN_NAME = 'hierarchy_v1'  # TO DO: update run name
+    RUN_NAME = args.run_name if args.run_name else _pick_next_run_name()
+    print(f"Training run directory: {RUN_NAME}")
     LOC_SDF_CACHE = 'cache'
     LOC_SAVE_NEW_MODELS = RUN_NAME
 
@@ -115,18 +169,43 @@ def main():
 
     config['experiment_directory'] = os.path.abspath(LOC_SAVE_NEW_MODELS)
 
-    # --- Hierarchy loss configuration defaults ---
-    config.setdefault('hierarchy_loss_enabled', True)
-    config.setdefault('hierarchy_contrastive_weight', 0.01)
-    config.setdefault('hierarchy_contrastive_warmup', 200)
+    slurm_id = os.environ.get('SLURM_JOB_ID', '')
+    sentinel = f'.last_train_run.{slurm_id}' if slurm_id else '.last_train_run'
+    with open(sentinel, 'w') as f:
+        f.write(RUN_NAME)
+
+    # --- Hierarchy loss configuration (CLI > config file > hardcoded default) ---
+    def _override(key, cli_val, default):
+        if cli_val is not None:
+            config[key] = cli_val
+        else:
+            config.setdefault(key, default)
+
+    config['hierarchy_loss_enabled'] = not args.no_contrastive
+    config['classification_heads_enabled'] = not args.no_heads
+    _override('hierarchy_contrastive_weight', args.contrastive_weight, 0.01)
+    _override('hierarchy_contrastive_warmup', args.contrastive_warmup, 200)
     config.setdefault('hierarchy_contrastive_margins', {0: 0.0, 1: 1.0, 2: 2.0, 3: 4.0})
-    config.setdefault('classification_heads_enabled', True)
-    config.setdefault('classification_head_weight', 0.005)
-    config.setdefault('classification_head_warmup', 100)
-    config.setdefault('classification_head_hidden_dim', 256)
-    config.setdefault('classification_level_weights', {
-        'species': 1.0, 'genus': 0.5, 'family': 0.25, 'position': 0.75,
-    })
+    _override('classification_head_weight', args.head_weight, 0.005)
+    _override('classification_head_warmup', args.head_warmup, 100)
+    _override('classification_head_hidden_dim', args.head_hidden_dim, 256)
+
+    default_level_weights = {'species': 1.0, 'genus': 0.5, 'family': 0.25, 'position': 0.75}
+    config.setdefault('classification_level_weights', default_level_weights)
+    for lvl, cli_val in [('species', args.species_weight), ('genus', args.genus_weight),
+                         ('family', args.family_weight), ('position', args.position_weight)]:
+        if cli_val is not None:
+            config['classification_level_weights'][lvl] = cli_val
+
+    print("Hierarchy loss config:")
+    print(f"  contrastive: enabled={config['hierarchy_loss_enabled']}, "
+          f"weight={config['hierarchy_contrastive_weight']}, "
+          f"warmup={config['hierarchy_contrastive_warmup']}")
+    print(f"  heads:       enabled={config['classification_heads_enabled']}, "
+          f"weight={config['classification_head_weight']}, "
+          f"warmup={config['classification_head_warmup']}, "
+          f"hidden_dim={config['classification_head_hidden_dim']}")
+    print(f"  level weights: {config['classification_level_weights']}")
 
     # ======================================================================
     # Data loading (same as train_model.py)
@@ -337,6 +416,28 @@ def main():
                     serializable[k] = str(v)
             with open(config_save_path, 'w') as f:
                 json.dump(serializable, f, indent=2, default=str)
+
+        # Focused hyperparams manifest — just the hierarchy-relevant knobs,
+        # for easy side-by-side comparison across grid-search runs.
+        hyperparams_manifest = {
+            'run_name': RUN_NAME,
+            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),
+            'slurm_job_id': os.environ.get('SLURM_JOB_ID'),
+            'cli_args': sys.argv[1:],
+            'hierarchy_loss_enabled': config['hierarchy_loss_enabled'],
+            'hierarchy_contrastive_weight': config['hierarchy_contrastive_weight'],
+            'hierarchy_contrastive_warmup': config['hierarchy_contrastive_warmup'],
+            'hierarchy_contrastive_margins': config['hierarchy_contrastive_margins'],
+            'classification_heads_enabled': config['classification_heads_enabled'],
+            'classification_head_weight': config['classification_head_weight'],
+            'classification_head_warmup': config['classification_head_warmup'],
+            'classification_head_hidden_dim': config['classification_head_hidden_dim'],
+            'classification_level_weights': config['classification_level_weights'],
+        }
+        hp_path = os.path.join(config['experiment_directory'], 'hyperparams.json')
+        with open(hp_path, 'w') as f:
+            json.dump(hyperparams_manifest, f, indent=2, default=str)
+        print(f"Wrote hyperparams manifest: {hp_path}")
 
         splits_path = os.path.join(config['experiment_directory'], 'data_splits.json')
         with open(splits_path, 'w') as f:

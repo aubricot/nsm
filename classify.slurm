@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --gpus=1
 #SBATCH --mem=64G
-#SBATCH --time=48:00:00
+#SBATCH --time=6:00:00
 #SBATCH --output=/blue/arthur.porto-biocosmos/mdelage6.gatech/classification-NSM/logs/%x_%j.log
 #SBATCH --error=/blue/arthur.porto-biocosmos/mdelage6.gatech/classification-NSM/logs/%x_%j.err
 
@@ -59,17 +59,14 @@ nvidia-smi || echo "WARNING: nvidia-smi failed"
 echo "SLURM GPU info..."
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 
-echo "Starting training... (extra args: $*)"
-python run_train_hierarchy.py "$@"
+echo "Starting classification baseline..."
+python run_classify.py
 
-echo "Training finished successfully."
+echo "Classification finished successfully."
 date
 
-SENTINEL=".last_train_run.${SLURM_JOB_ID}"
-[[ -f "$SENTINEL" ]] || SENTINEL=".last_train_run"
-RUN_DIR=$(cat "$SENTINEL")
-echo "Starting classification on run directory: $RUN_DIR"
-python run_classify.py --run-dir "$RUN_DIR"
+echo "Starting classification hierarchy..."
+python run_classify.py --run-dir hierarchy_v1
 
 echo "Classification finished successfully."
 date

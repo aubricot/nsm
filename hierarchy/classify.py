@@ -170,15 +170,15 @@ def main():
     # ======================================================================
     # Configuration
     # ======================================================================
-    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    SPINE_CSV_PATH = os.path.join(SCRIPT_DIR, "vertebrae_counts.csv")
+    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    SPINE_CSV_PATH = os.path.join(PROJECT_ROOT, "vertebrae_counts.csv")
     spine_mapper = SpinePositionMapper(SPINE_CSV_PATH) if os.path.isfile(SPINE_CSV_PATH) else None
     if spine_mapper:
         print(f"SpinePositionMapper loaded: {len(spine_mapper.specimens)} specimens")
     else:
         print("Warning: vertebrae_counts.csv not found, continuous position disabled")
 
-    TRAIN_DIR = os.path.join(SCRIPT_DIR, args.run_dir)
+    TRAIN_DIR = os.path.join(PROJECT_ROOT, args.run_dir)
     if not os.path.isdir(TRAIN_DIR):
         raise FileNotFoundError(f"Run directory not found: {TRAIN_DIR}")
 
