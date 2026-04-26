@@ -62,12 +62,43 @@ echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 echo "Starting training... (extra args: $*)"
 python run_train_hierarchy.py "$@"
 
-echo "Training finished successfully."
+echo "Training python exited cleanly."
 date
 
-SENTINEL=".last_train_run.${SLURM_JOB_ID}"
+# ---- Resolve run directory written by train.py ------------------------------
+SENTINEL=".last_train_run.${SLURM_JOB_ID:-}"
 [[ -f "$SENTINEL" ]] || SENTINEL=".last_train_run"
+if [[ ! -f "$SENTINEL" ]]; then
+    echo "ERROR: no .last_train_run sentinel was written. Training likely never started."
+    exit 1
+fi
 RUN_DIR=$(cat "$SENTINEL")
+
+# ---- Post-training sanity checks --------------------------------------------
+# Training is "successful" only if the expected artifacts exist. Otherwise the
+# python process may have exited 0 without doing real work (e.g. silent dead-
+# code path, dataset loading short-circuit, OOM that aborted between epochs).
+if [[ ! -d "$RUN_DIR" ]]; then
+    echo "ERROR: run directory '$RUN_DIR' does not exist after training."
+    echo "       Training python exited 0 but produced no output directory."
+    exit 1
+fi
+if [[ ! -d "$RUN_DIR/model" ]] || ! ls "$RUN_DIR/model"/*.pth >/dev/null 2>&1; then
+    echo "ERROR: no model checkpoints in $RUN_DIR/model/. Training did not reach a save_frequency epoch."
+    ls -la "$RUN_DIR" || true
+    exit 1
+fi
+if [[ ! -d "$RUN_DIR/latent_codes" ]] || ! ls "$RUN_DIR/latent_codes"/*.pth >/dev/null 2>&1; then
+    echo "ERROR: no latent codes in $RUN_DIR/latent_codes/. Training output is incomplete."
+    ls -la "$RUN_DIR" || true
+    exit 1
+fi
+echo "Sanity check passed: $RUN_DIR has model+latent checkpoints."
+echo "  model:        $(ls "$RUN_DIR/model"/*.pth | wc -l) file(s)"
+echo "  latent_codes: $(ls "$RUN_DIR/latent_codes"/*.pth | wc -l) file(s)"
+echo "  hyperparams.json: $([[ -f "$RUN_DIR/hyperparams.json" ]] && echo yes || echo MISSING)"
+echo "  config.json:      $([[ -f "$RUN_DIR/config.json" ]] && echo yes || echo MISSING)"
+
 echo "Starting classification on run directory: $RUN_DIR"
 python run_classify.py --run-dir "$RUN_DIR"
 

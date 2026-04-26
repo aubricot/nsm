@@ -47,17 +47,21 @@ if [[ ! -f run_train_hierarchy.py ]]; then
     exit 1
 fi
 
-# ---------- Manifest header ---------------------------------------------------
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-MANIFEST="grid_manifest_${TIMESTAMP}.csv"
-echo "job_id,run_name,contrastive_weight,head_weight,submitted_at" > "$MANIFEST"
+# ---------- Sweep identifier --------------------------------------------------
+# Single timestamp shared by every run in this sweep + the manifest filename,
+# so re-running this script never overwrites a prior sweep and runs from the
+# same sweep are easy to group (same prefix in their dir name).
+SWEEP_TS=$(date +%Y%m%d_%H%M%S)
+MANIFEST="grid_manifest_${SWEEP_TS}.csv"
+echo "job_id,run_name,contrastive_weight,head_weight,sweep_ts,submitted_at" > "$MANIFEST"
 
 echo "================================================================"
-echo "Grid search sweep"
+echo "Grid search sweep ${SWEEP_TS}"
 echo "  contrastive weights: ${CONTRASTIVE_WEIGHTS[*]}"
 echo "  head weights:        ${HEAD_WEIGHTS[*]}"
 echo "  total jobs:          $(( ${#CONTRASTIVE_WEIGHTS[@]} * ${#HEAD_WEIGHTS[@]} ))"
 echo "  manifest:            $MANIFEST"
+echo "  run-dir prefix:      hierarchy_grid_${SWEEP_TS}_..."
 echo "================================================================"
 
 # ---------- Submit ------------------------------------------------------------
@@ -66,8 +70,10 @@ SKIPPED=0
 
 for cw in "${CONTRASTIVE_WEIGHTS[@]}"; do
     for hw in "${HEAD_WEIGHTS[@]}"; do
-        RUN_NAME="hierarchy_grid_cw${cw}_hw${hw}"
+        RUN_NAME="hierarchy_grid_${SWEEP_TS}_cw${cw}_hw${hw}"
 
+        # Defensive: should never trigger because SWEEP_TS makes names unique
+        # per sweep. Keeps the script safe if you ever re-issue with the same TS.
         if [[ -d "$RUN_NAME" ]]; then
             echo "SKIP: $RUN_NAME already exists (delete it to re-run this cell)"
             SKIPPED=$((SKIPPED + 1))
@@ -75,7 +81,7 @@ for cw in "${CONTRASTIVE_WEIGHTS[@]}"; do
         fi
 
         OUT=$(sbatch \
-            --job-name="gridhx_cw${cw}_hw${hw}" \
+            --job-name="gridhx_${SWEEP_TS}_cw${cw}_hw${hw}" \
             train_classify.slurm \
             --run-name "$RUN_NAME" \
             --contrastive-weight "$cw" \
@@ -84,7 +90,7 @@ for cw in "${CONTRASTIVE_WEIGHTS[@]}"; do
         # sbatch prints: "Submitted batch job <id>"
         JOB_ID=$(echo "$OUT" | awk '{print $NF}')
         echo "SUBMIT: job=$JOB_ID  run=$RUN_NAME  cw=$cw  hw=$hw"
-        echo "$JOB_ID,$RUN_NAME,$cw,$hw,$(date -Iseconds)" >> "$MANIFEST"
+        echo "$JOB_ID,$RUN_NAME,$cw,$hw,$SWEEP_TS,$(date -Iseconds)" >> "$MANIFEST"
         SUBMITTED=$((SUBMITTED + 1))
     done
 done

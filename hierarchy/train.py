@@ -71,15 +71,28 @@ loss_l1 = torch.nn.L1Loss(reduction="none")
 
 def _pick_next_run_name(base: str = "hierarchy_v") -> str:
     """Return `hierarchy_v<N>` where N is one higher than the largest
-    existing `hierarchy_v<int>` directory in CWD, or `hierarchy_v1` if none."""
-    nums = []
-    for entry in os.listdir('.'):
-        if os.path.isdir(entry) and entry.startswith(base):
-            suffix = entry[len(base):]
-            if suffix.isdigit():
-                nums.append(int(suffix))
-    next_n = max(nums) + 1 if nums else 1
-    return f"{base}{next_n}"
+    existing `hierarchy_v<int>` directory in CWD.
+
+    Falls back to a timestamped name `hierarchy_v<YYYYMMDD_HHMMSS>` if the
+    auto-increment scan fails for any reason (unreadable CWD, race against
+    another process, unexpected entries, etc.) — guarantees we never
+    silently overwrite a previous run's outputs."""
+    try:
+        nums = []
+        for entry in os.listdir('.'):
+            if os.path.isdir(entry) and entry.startswith(base):
+                suffix = entry[len(base):]
+                if suffix.isdigit():
+                    nums.append(int(suffix))
+        next_n = max(nums) + 1 if nums else 1
+        candidate = f"{base}{next_n}"
+        if os.path.exists(candidate):
+            raise RuntimeError(f"selected name '{candidate}' raced with another process")
+        return candidate
+    except Exception as e:
+        fallback = f"{base}{time.strftime('%Y%m%d_%H%M%S')}"
+        print(f"WARNING: auto-increment naming failed ({e}); using timestamped fallback '{fallback}'")
+        return fallback
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -206,6 +219,30 @@ def main():
           f"warmup={config['classification_head_warmup']}, "
           f"hidden_dim={config['classification_head_hidden_dim']}")
     print(f"  level weights: {config['classification_level_weights']}")
+
+    # Create the run directory and write the focused hyperparams manifest
+    # *before* heavy work (dataset loading, model build), so even an early
+    # crash leaves a record of what was attempted at this directory.
+    os.makedirs(config['experiment_directory'], exist_ok=True)
+    hyperparams_manifest = {
+        'run_name': RUN_NAME,
+        'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),
+        'slurm_job_id': os.environ.get('SLURM_JOB_ID'),
+        'cli_args': sys.argv[1:],
+        'hierarchy_loss_enabled': config['hierarchy_loss_enabled'],
+        'hierarchy_contrastive_weight': config['hierarchy_contrastive_weight'],
+        'hierarchy_contrastive_warmup': config['hierarchy_contrastive_warmup'],
+        'hierarchy_contrastive_margins': config['hierarchy_contrastive_margins'],
+        'classification_heads_enabled': config['classification_heads_enabled'],
+        'classification_head_weight': config['classification_head_weight'],
+        'classification_head_warmup': config['classification_head_warmup'],
+        'classification_head_hidden_dim': config['classification_head_hidden_dim'],
+        'classification_level_weights': config['classification_level_weights'],
+    }
+    hp_path = os.path.join(config['experiment_directory'], 'hyperparams.json')
+    with open(hp_path, 'w') as f:
+        json.dump(hyperparams_manifest, f, indent=2, default=str)
+    print(f"Wrote hyperparams manifest: {hp_path}")
 
     # ======================================================================
     # Data loading (same as train_model.py)
@@ -416,28 +453,6 @@ def main():
                     serializable[k] = str(v)
             with open(config_save_path, 'w') as f:
                 json.dump(serializable, f, indent=2, default=str)
-
-        # Focused hyperparams manifest — just the hierarchy-relevant knobs,
-        # for easy side-by-side comparison across grid-search runs.
-        hyperparams_manifest = {
-            'run_name': RUN_NAME,
-            'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),
-            'slurm_job_id': os.environ.get('SLURM_JOB_ID'),
-            'cli_args': sys.argv[1:],
-            'hierarchy_loss_enabled': config['hierarchy_loss_enabled'],
-            'hierarchy_contrastive_weight': config['hierarchy_contrastive_weight'],
-            'hierarchy_contrastive_warmup': config['hierarchy_contrastive_warmup'],
-            'hierarchy_contrastive_margins': config['hierarchy_contrastive_margins'],
-            'classification_heads_enabled': config['classification_heads_enabled'],
-            'classification_head_weight': config['classification_head_weight'],
-            'classification_head_warmup': config['classification_head_warmup'],
-            'classification_head_hidden_dim': config['classification_head_hidden_dim'],
-            'classification_level_weights': config['classification_level_weights'],
-        }
-        hp_path = os.path.join(config['experiment_directory'], 'hyperparams.json')
-        with open(hp_path, 'w') as f:
-            json.dump(hyperparams_manifest, f, indent=2, default=str)
-        print(f"Wrote hyperparams manifest: {hp_path}")
 
         splits_path = os.path.join(config['experiment_directory'], 'data_splits.json')
         with open(splits_path, 'w') as f:
@@ -866,16 +881,16 @@ def main():
     # ======================================================================
     # Run training
     # ======================================================================
-        train_deep_sdf_hierarchy(
-            config=config,
-            model=model,
-            sdf_dataset=sdf_dataset,
-            taxonomy_encoder=taxonomy_encoder,
-            taxonomy_info=taxonomy_info,
-            classification_heads=classification_heads,
-            hierarchy_contrastive=hierarchy_contrastive,
-            use_wandb=USE_WANDB,
-        )
+    train_deep_sdf_hierarchy(
+        config=config,
+        model=model,
+        sdf_dataset=sdf_dataset,
+        taxonomy_encoder=taxonomy_encoder,
+        taxonomy_info=taxonomy_info,
+        classification_heads=classification_heads,
+        hierarchy_contrastive=hierarchy_contrastive,
+        use_wandb=USE_WANDB,
+    )
 
 
 if __name__ == "__main__":
