@@ -107,6 +107,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         help='Weight on the hierarchy contrastive loss (default 0.01).')
     parser.add_argument('--contrastive-warmup', type=int, default=None,
                         help='Warmup epochs before contrastive loss reaches full weight (default 200).')
+    parser.add_argument('--contrastive-margins', type=float, nargs=4, default=None,
+                        metavar=('M0', 'M1', 'M2', 'M3'),
+                        help='Four floats: per-taxonomic-distance margins for the '
+                             'hierarchy contrastive loss. M0=same species (attract), '
+                             'M1=same genus, M2=same family, M3=different family. '
+                             '(default 0.0 1.0 2.0 4.0). Note: latents are '
+                             'L2-normalized so achievable distances are in [0, 2]; '
+                             'margins above 2.0 produce a permanently-active push.')
     # Classification heads
     parser.add_argument('--head-weight', type=float, default=None,
                         help='Weight on the classification-head loss (default 0.005).')
@@ -198,7 +206,13 @@ def main():
     config['classification_heads_enabled'] = not args.no_heads
     _override('hierarchy_contrastive_weight', args.contrastive_weight, 0.01)
     _override('hierarchy_contrastive_warmup', args.contrastive_warmup, 200)
-    config.setdefault('hierarchy_contrastive_margins', {0: 0.0, 1: 1.0, 2: 2.0, 3: 4.0})
+    if args.contrastive_margins is not None:
+        config['hierarchy_contrastive_margins'] = {
+            i: float(v) for i, v in enumerate(args.contrastive_margins)
+        }
+    else:
+        config.setdefault('hierarchy_contrastive_margins',
+                          {0: 0.0, 1: 1.0, 2: 2.0, 3: 4.0})
     _override('classification_head_weight', args.head_weight, 0.005)
     _override('classification_head_warmup', args.head_warmup, 100)
     _override('classification_head_hidden_dim', args.head_hidden_dim, 256)
@@ -213,7 +227,8 @@ def main():
     print("Hierarchy loss config:")
     print(f"  contrastive: enabled={config['hierarchy_loss_enabled']}, "
           f"weight={config['hierarchy_contrastive_weight']}, "
-          f"warmup={config['hierarchy_contrastive_warmup']}")
+          f"warmup={config['hierarchy_contrastive_warmup']}, "
+          f"margins={config['hierarchy_contrastive_margins']}")
     print(f"  heads:       enabled={config['classification_heads_enabled']}, "
           f"weight={config['classification_head_weight']}, "
           f"warmup={config['classification_head_warmup']}, "

@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --gpus=1
 #SBATCH --mem=64G
-#SBATCH --time=48:00:00
+#SBATCH --time=15:00:00
 #SBATCH --output=/blue/arthur.porto-biocosmos/mdelage6.gatech/classification-NSM/logs/%x_%j.log
 #SBATCH --error=/blue/arthur.porto-biocosmos/mdelage6.gatech/classification-NSM/logs/%x_%j.err
 
