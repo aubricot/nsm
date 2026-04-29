@@ -48,7 +48,7 @@ def convert_ply_to_vtk(input_file, output_file=None, save=False):
     mesh = pv.read(input_file)
     if save==True:
         mesh.save(output_file)
-    print(f"Converted {input_file} → {output_file}")
+    print(f"Converted {input_file} -> {output_file}")
     return mesh, output_file
 
 # Load model config file

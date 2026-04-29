@@ -1548,7 +1548,7 @@ class SDFSamples(torch.utils.data.Dataset):
             tic = time.time()
             data_ = np.load(self.data[idx])
             toc = time.time()
-            time_ = toc - tic
+            time_ = max(toc - tic, 1e-6)
 
             # get size of the numpy file in mb
             size = os.path.getsize(self.data[idx]) / 1e6
