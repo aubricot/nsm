@@ -206,7 +206,7 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
         self.onLogMessage("Result path: " + self._resultPath)
 
         # Path to the worker script (lives next to this module)
-        workerScript = os.path.join(os.path.dirname(os.path.dirname(__file__)), "shape_completion.py")
+        workerScript = os.path.join(os.path.dirname(os.path.dirname(__file__)), "shape_completion_slicer.py")
 
         # Use Slicer's own Python so the environment matches
         pythonExe = sys.executable
