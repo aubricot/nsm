@@ -293,6 +293,21 @@ class ShapeCompletionLogic(ScriptedLoadableModuleLogic):
 
     @staticmethod
     def installDependenciesIfNeeded():
+        # Conditionally use tiny3d (o3d) for Slicer
+        USE_TINY3D = True  # Set this to False in normal use (outside Slicer)
+
+        if USE_TINY3D:
+            try:
+                import tiny3d as o3d  # Import tiny3d as o3d for Slicer logic
+            except ImportError:
+                slicer.util.pip_install('tiny3d')
+                import tiny3d as o3d  # Try again after installing
+        else:
+            try:
+                import open3d as o3d  # Use open3d for the rest of the project
+            except ImportError:
+                slicer.util.pip_install('open3d')
+                import open3d as o3d  # Try again after installing
         try:
             import cv2
         except ImportError:
@@ -306,10 +321,6 @@ class ShapeCompletionLogic(ScriptedLoadableModuleLogic):
         except ImportError:
             slicer.util.pip_install('mskt')
         try:
-            import open3d
-        except ImportError:
-            slicer.util.pip_install('open3d')
-        try:
             import pyvista
         except ImportError:
             slicer.util.pip_install('pyvista')
@@ -321,3 +332,7 @@ class ShapeCompletionLogic(ScriptedLoadableModuleLogic):
             import sklearn
         except ImportError:
             slicer.util.pip_install('scikit-learn')
+        try:
+            import torch
+        except ImportError:
+            slicer.util.pip_install('torch')
