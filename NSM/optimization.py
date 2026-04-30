@@ -6,8 +6,11 @@ import numpy as np
 import torch
 from NSM.helper_funcs import get_sdfs  
 import pyvista as pv
-import open3d as o3d
 import json
+try:
+    import open3d as o3d
+except:
+    print("Error importing open3d")
 
 # Initialize latent near PCA offset mean
 def pca_initialize_latent(mean_latent, latent_codes, top_k=10):

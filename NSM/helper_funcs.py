@@ -1,6 +1,5 @@
 # Utility functions for loading trained models and inspecting results
-
-import os, json, torch, numpy as np, open3d as o3d, pyvista as pv, vtk
+import os, json, torch, numpy as np, pyvista as pv, vtk
 from NSM.models import TriplanarDecoder
 from scipy.spatial import cKDTree
 from sklearn.decomposition import PCA
@@ -14,6 +13,10 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from pathlib import Path
+try:
+    import open3d as o3d
+except:
+    print("Error importing open3d")
 
 # ICP transform
 class NumpyTransform:
