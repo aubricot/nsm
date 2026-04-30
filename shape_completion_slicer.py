@@ -6,16 +6,45 @@ import numpy as np
 import pymskt.mesh.meshes as meshes
 import sys
 import random
+import slicer
+import tiny3d as o3d
 
+
+# Pyvista to Open3D    
+def pv_to_tiny3d(mesh_pv):
+    pts = np.asarray(mesh_pv.points)
+    faces = np.asarray(mesh_pv.faces)
+    tris = faces.reshape(-1,4)[:,1:4]
+    mesh_o3d = o3d.geometry.TriangleMesh()
+    mesh_o3d.vertices = o3d.utility.Vector3dVector(pts)
+    mesh_o3d.triangles = o3d.utility.Vector3iVector(tris)
+    mesh_o3d.compute_vertex_normals()
+    return mesh_o3d
 
 def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_path=None, output_folder_path=None):
+    USE_TINY3D = True  # Set this flag based on Slicer environment
+
+    # Dynamically import open3d/tiny3d depending on USE_TINY3D
+    if USE_TINY3D:
+        try:
+            import tiny3d as o3d
+            print("Using tiny3d as o3d")
+        except ImportError:
+            slicer.util.pip_install('tiny3d')
+            import tiny3d as o3d  # Try again after installing
+    else:
+        try:
+            import open3d as o3d
+            print("Using open3d")
+        except ImportError:
+            slicer.util.pip_install('open3d')
+            import open3d as o3d  # Try again after installing
     from NSM.datasets import SDFSamples
     from NSM.mesh import create_mesh
     from NSM.helper_funcs import (
         NumpyTransform, 
         load_config, 
         load_model_and_latents, 
-        convert_ply_to_vtk, 
         fixed_point_coords, 
         safe_load_mesh_scalars
     )
@@ -29,7 +58,6 @@ def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_p
     meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
     meshes.Mesh.point_coords = property(fixed_point_coords)
 
-    
     # Define training directory
     TRAIN_DIR = "run_v57" # TO DO: Choose training directory containing model ckpt and latent codes
     if model_path is None: os.chdir(TRAIN_DIR)
@@ -39,7 +67,8 @@ def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_p
 
     # Load model config
     config = load_config(config_path='model_params_config.json' if config_path is None else config_path)
-    device = config.get("device", "cuda:0")
+    #device = config.get("device", "cuda:0")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Select matching paths of partial meshes for shape completion
     if input_mesh_path is None:
