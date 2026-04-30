@@ -145,21 +145,21 @@ def main():
                        help="Directory with segment PLYs (*_seg_XX.ply)")
     parser.add_argument("output_dir",
                        help="Output directory for partial meshes")
-    parser.add_argument("--total_segments", type=int, default=7,
-                       help="Total number of segments per mesh (default: 7).")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--num_rand", type=int, default=0,
+    group.add_argument("--num_rand_segs", type=int, default=0,
                        help="Number of random segments to remove from each mesh (default: 0)")
-    group.add_argument("--segment_ids", type=str, default="6",
-                       help="Comma separated segment ids to remove (default: 6). If --num_rand is provided, --segments_ids is ignored.")
+    group.add_argument("--seg_ids", type=str, default="6",
+                       help="Comma separated segment ids to remove (default: 6). If --num_rand_segs is provided, --seg_ids is ignored.")
+    parser.add_argument("--total_segs", type=int, default=7,
+                       help="Total number of segments per mesh (default: 7)")
     args = parser.parse_args()
     create_validation_dataset(
         args.original_dir,
         args.segments_dir,
         args.output_dir,
-        num_rand_to_remove=args.num_rand,
-        segment_ids_to_remove=[int(id) for id in str.split(args.segment_ids, ",") if id],
-        total_num_segments=args.total_segments)
+        num_rand_to_remove=args.num_rand_segs,
+        segment_ids_to_remove=[int(id) for id in str.split(args.seg_ids, ",") if id],
+        total_num_segments=args.total_segs)
 
 if __name__ == "__main__":
     main()
