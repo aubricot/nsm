@@ -19,4 +19,8 @@ Use Fossil NSM Module in [3D Slicer](https://www.slicer.org/) to do shape comple
 8. Build the Fossil NSM Module   
    Extension Wizard -> Select Extension -> path/to/your/nsm/FossilNsmModule
 9. Use Fossil NSM Module to do shape completion!
-   Modules -> Fossil NSM -> Select your input files and click "Run Inference"
+   Modules -> Fossil NSM -> Shape Completion -> Select your input files and click "Run Inference"
+
+   
+![Fossil NSM Module](https://github.com/aubricot/nsm/blob/main/images/fossilnsmmodule.png)
+*Screenshot of shape completion results produced using Fossil NSM Module in 3D Slicer*
