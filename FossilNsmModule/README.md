@@ -6,13 +6,16 @@ Use Fossil NSM Module in [3D Slicer](https://www.slicer.org/) to do shape comple
 
 # Installation
 1. Open 3D Slicer
-2. Install the PyTorch extension for 3D Slicer ([link to source code](https://github.com/fepegar/SlicerPyTorch)   
+2. Install the PyTorch extension for 3D Slicer ([link to source code](https://github.com/fepegar/SlicerPyTorch))   
    View -> Extension Manager -> Install Extensions -> PyTorch
 3. Restart 3D Slicer
-4. Download the [nsm GitHub repo](https://github.com/3D-fossils-Haag/nsm/tree/main)   
+4. Specify pytorch version to be compatible with NSM
+   Modules -> PyTorch
+   Torch version requirement: ==2.5.1
+6. Download the [nsm GitHub repo](https://github.com/3D-fossils-Haag/nsm/tree/main)   
    Via git clone or download zip
-5. Open 3D Slicer
-6. Build the Fossil NSM Module   
+7. Open 3D Slicer
+8. Build the Fossil NSM Module   
    Extension Wizard -> Select Extension -> path/to/your/nsm/FossilNsmModule
-7. Use Fossil NSM Module to do shape completion!
+9. Use Fossil NSM Module to do shape completion!
    Modules -> Fossil NSM -> Select your input files and click "Run Inference"
