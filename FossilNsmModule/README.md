@@ -24,3 +24,21 @@ Use Fossil NSM Module in [3D Slicer](https://www.slicer.org/) to do shape comple
    
 ![Fossil NSM Module](https://github.com/aubricot/nsm/blob/main/images/fossilnsmmodule.png)
 *Screenshot of shape completion results produced using Fossil NSM Module in 3D Slicer*
+
+# Data Preprocessing
+**A) Smoothing**    
+Ensure your fossil data is smooth and simplified to be comparable to our training data. This ensures that differences in shape are given priority, not differences in surface texture.
+1. Open 3D Slicer
+2. Modules -> Surface Toolkit
+3. Set parameters following screenshot below.
+   
+![Surface Toolkit Parameters](https://github.com/aubricot/nsm/blob/main/images/surftoolkit.png)
+*Screenshot of parameters used to preprocess meshes using the Surface Toolkit in 3D Slicer*
+
+**B) Align and Scale**
+Align and scale your fossil to the statistical shape model (SSM) used to prepare our training data. This ensures differences in shape are given priority, not differences in position or scale.
+1. Open 3D Slicer
+2. Inspect SSM model and landmarks in the 3D viewer.
+3. Use the Markups Module to manually landmark your specimen following the template.
+4. Open your preferred code editor (e.g. VS Code)
+5. Use [align_model_to_ssm.py](https://github.com/3D-fossils-Haag/nsm/blob/main/align_model_to_ssm.py) to align your landmarked fossil to the SSM used for training data preprocessing.
