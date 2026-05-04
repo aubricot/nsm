@@ -35,7 +35,7 @@ Ensure your fossil data is smooth and simplified to be comparable to our trainin
 ![Surface Toolkit Parameters](https://github.com/aubricot/nsm/blob/main/images/surftoolkit.png)
 *Screenshot of parameters used to preprocess meshes using the Surface Toolkit in 3D Slicer*
 
-**B) Align and Scale**
+**B) Align and Scale**   
 Align and scale your fossil to the statistical shape model (SSM) used to prepare our training data. This ensures differences in shape are given priority, not differences in position or scale.
 1. Open 3D Slicer
 2. Inspect SSM model and landmarks in the 3D viewer.
