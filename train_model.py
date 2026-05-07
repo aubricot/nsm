@@ -1,46 +1,51 @@
 """
-Train a Neural Shape Model (NSM) with contrastive loss on vertebrae VTK meshes.
-
+Train a Neural Shape Model (NSM) on vertebrae VTK meshes with selectable loss modes.
 Loads vertebrae meshes from a fixed folder, splits them 80/15/5 into
 train/test/val, builds an SDF dataset, constructs a TriplanarDecoder model,
-and launches training via the contrastive DeepSDF training loop.
-
+and launches one of:
+  - standard DeepSDF training
+  - contrastive DeepSDF training
+  - hierarchy-aware DeepSDF training
 Usage:
-    python train_model_contrastive.py --run_name my_experiment
-    run_name is important! It creates new folder where model checkpoints, latent codes, and the config snapshot are saved.
-
+    python train_model.py --run_name my_experiment
+    python train_model.py --run_name my_experiment --contrastive_loss
+    python train_model.py --run_name my_experiment --hierarchy_loss
 Arguments:
     --run_name TEXT
         Name for this training run. Controls where model checkpoints,
-        latent codes, and the config snapshot are saved. Default: run_v57a
+        latent codes, and config snapshots are saved. Default: run_v57a
     --contrastive_loss
-        Enable contrastive loss training loop. If not provided, standard training is used.
-
+        Enable contrastive loss training loop.
+    --hierarchy_loss
+        Enable hierarchy-aware loss training loop.
+        NOTE: --contrastive_loss and --hierarchy_loss are mutually exclusive.
 Configuration:
     Training hyperparameters (latent size, learning rate, batch size, etc.)
     are read from vertebrae_config.json in the current directory.
-
-    IMPORTANT: Define "contrastive_weight": 0.01 in config to enable contrastive loss with the specified weight (recommended). 
-    Default is 0 (no contrastive loss) if contrastive_weight is not specified in the config.
-
+    Contrastive mode:
+      Define "contrastive_weight" in config (recommended 0.01).
+      If missing/0 while enabled, it is set to 0.01 with a warning.
+    Hierarchy mode:
+      Define "hierarchy_weight" in config (recommended 0.01).
+      Optional config keys:
+        - "hierarchy_warmup" (default 200)
+        - "hierarchy_margins" (default {0:0.0, 1:1.0, 2:2.0, 3:4.0})
+      If hierarchy_weight is missing/0 while enabled, it is set to 0.01 with a warning.
     After training, a copy of the resolved config is saved to
-    {run_name}/model_params_config.json for use by downstream scripts.
-
+    {run_name}/model_params_config.json for downstream scripts.
 Data:
     VTK meshes are loaded from ./vertebrae_meshes/*.vtk.
     SDF point samples are cached to ./nsm_sdf_cache/{run_name}/ so that
-    subsequent runs with the same data skip the expensive SDF computation.
+    subsequent runs with the same data skip expensive SDF computation.
     Set load_cache: true in vertebrae_config.json to reuse cached samples.
-
 Output:
-    {run_name}/model/          - Model checkpoints (.pth) at each save epoch
-    {run_name}/latent_codes/   - Latent code tensors (.pth) at each save epoch
-    {run_name}/model_params_config.json - Full resolved config snapshot
-    ./nsm_sdf_cache/{run_name}/         - SDF sample cache (NPZ files), can be deleted after training and inference if taking too much space
-
+    {run_name}/model/                - Model checkpoints (.pth)
+    {run_name}/latent_codes/         - Latent code tensors (.pth)
+    {run_name}/model_params_config.json - Resolved config snapshot
+    ./nsm_sdf_cache/{run_name}/      - SDF sample cache (NPZ files)
 Notes:
     Set USE_WANDB = True and export WANDB_KEY to enable Weights & Biases logging.
-    Random seed is fixed (seed from config) for reproducibility of the train/test/val split.
+    Random seed is fixed (seed from config) for reproducible train/test/val split.
     Monkey-patches pymskt signed_distance_to_mesh to enforce float64 inputs.
 """
 
@@ -70,19 +75,37 @@ with open(path_config, 'r') as f:
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--run_name', type=str, default='run_v57a', help='Run name used for saving model and SDF cache')
-parser.add_argument("--contrastive_loss", action="store_true", help="Enable contrastive loss training loop.")
+loss_mode = parser.add_mutually_exclusive_group()
+loss_mode.add_argument("--contrastive_loss", action="store_true", help="Enable contrastive loss training loop.")
+loss_mode.add_argument("--hierarchy_loss", action="store_true", help="Enable hierarchy-aware loss training loop.")
 args = parser.parse_args()
 
-# Set contrastive loss, if using
-if args.contrastive_loss:
+# Set loss mode, if using
+if args.hierarchy_loss:
+    from NSM.train.train_deep_sdf_hierarchy import train_deep_sdf
+    if config.get("hierarchy_weight", 0) == 0:
+        print("WARNING: hierarchy_loss enabled but hierarchy_weight=0. Setting to 0.01")
+        config["hierarchy_weight"] = 0.01
+    # Config-driven params, like contrastive
+    config.setdefault("hierarchy_warmup", 200)
+    config.setdefault("hierarchy_margins", {0: 0.0, 1: 1.0, 2: 2.0, 3: 4.0})
+    config["use_hierarchy_loss"] = True
+    config["use_contrastive_loss"] = False
+    print("Using hierarchy-aware DeepSDF training.")
+elif args.contrastive_loss:
     from NSM.train.train_deep_sdf_contrastive import train_deep_sdf
     if config.get("contrastive_weight", 0) == 0:
         print("WARNING: contrastive_loss enabled but contrastive_weight=0. Setting to 0.01")
         config["contrastive_weight"] = 0.01
+    config["use_contrastive_loss"] = True
+    config["use_hierarchy_loss"] = False
     print("Using contrastive DeepSDF training.")
 else:
     from NSM.train.train_deep_sdf import train_deep_sdf
     config["contrastive_weight"] = 0
+    config["hierarchy_weight"] = 0
+    config["use_contrastive_loss"] = False
+    config["use_hierarchy_loss"] = False
     print("Using standard DeepSDF training.")
 
 CACHE = True
@@ -129,7 +152,6 @@ list_mesh_paths = sorted(all_vtk_files[:N_TRAIN])
 list_val_paths = sorted(all_vtk_files[N_TRAIN:N_TRAIN + N_VAL])
 list_test_paths = sorted(all_vtk_files[N_TRAIN + N_VAL:])
 
-config['use_contrastive_loss'] = args.contrastive_loss
 config['test_paths'] = list_test_paths
 config['val_paths'] = list_val_paths
 config['list_mesh_paths'] = list_mesh_paths
@@ -167,7 +189,7 @@ sdf_dataset = SDFSamples(
     n_processes=config['n_processes'],
 )
 print('sdf_dataset:', sdf_dataset)
-print('len sdf_dataaset', len(sdf_dataset))
+print('len sdf_dataset', len(sdf_dataset))
 
 triplane_args = {
     'latent_dim': config['latent_size'],
