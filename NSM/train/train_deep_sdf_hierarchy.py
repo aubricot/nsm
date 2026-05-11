@@ -223,7 +223,6 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
                 hierarchy_contrastive=hierarchy_contrastive,
                 classification_heads=classification_heads,
             )
-            _write_epoch_losses_csv(log_dict, losses_log_fpath)
 
             val_epoch = (
                 (epoch in config["checkpoints"])
@@ -263,6 +262,11 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
             if val_epoch:
                 print("\nValidation epoch...")
                 clear_gpu_cache(config["device"])
+
+                # 1) Write losses + relative percentages percentages to CSV post-run analysis
+                _write_epoch_losses_csv(log_dict, losses_log_fpath)
+
+                # 2) Write train losses
                 dict_loss = get_mean_errors(
                     mesh_paths=config["val_paths"],
                     decoders=model,

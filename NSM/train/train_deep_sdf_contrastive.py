@@ -344,8 +344,6 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
                 avg_latent_genus=avg_latent_genus,
             )
 
-            # Write all losses + percentages to CSV every epoch for post-run analysis
-            _write_epoch_losses_csv(log_dict, losses_log_fpath)
             # Compute average latents at end of epoch N to be used in epoch N+1
             # (intentionally lagged by one epoch so the target is stable during training)
             avg_latent_species, avg_latent_genus = _compute_avg_latents(
@@ -389,9 +387,10 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
                 print("\nValidation epoch...")
                 clear_gpu_cache(config["device"])
 
-                # TODO: Change this to just accept the config?
-                # or... update all parameters to be the same in the config and the function call?
-                # this will just allow unpacking of the config dict.
+                # 1) Write losses + relative percentages percentages to CSV post-run analysis
+                _write_epoch_losses_csv(log_dict, losses_log_fpath)
+
+                # 2) Write train losses
                 dict_loss = get_mean_errors(
                     mesh_paths=config["val_paths"],
                     decoders=model,
