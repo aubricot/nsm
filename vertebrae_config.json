@@ -188,6 +188,19 @@
         2500,
         3000
     ],
+    "hierarchy_weight": 0.001,
+    "hierarchy_warmup": 200,
+    "hierarchy_margins": {
+        "0": 0.0,
+        "1": 0.2,
+        "2": 0.4,
+        "3": 0.8
+    },
+    "use_hierarchy_loss": false,
+    "contrastive_weight": 0.02,
+    "contrastive_temperature": 0.2,
+    "contrastive_n_negatives": 32,
+    "use_contrastive_loss": false,
     "val_paths": [],
     "list_mesh_paths": []
 }

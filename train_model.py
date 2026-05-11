@@ -86,11 +86,7 @@ if args.hierarchy_loss:
     if config.get("hierarchy_weight", 0) == 0:
         print("WARNING: hierarchy_loss enabled but hierarchy_weight=0. Setting to 0.01")
         config["hierarchy_weight"] = 0.01
-    # Config-driven params, like contrastive
-    config.setdefault("hierarchy_warmup", 200)
-    config.setdefault("hierarchy_margins", {0: 0.0, 1: 1.0, 2: 2.0, 3: 4.0})
     config["use_hierarchy_loss"] = True
-    config["use_contrastive_loss"] = False
     print("Using hierarchy-aware DeepSDF training.")
 elif args.contrastive_loss:
     from NSM.train.train_deep_sdf_contrastive import train_deep_sdf
@@ -98,12 +94,9 @@ elif args.contrastive_loss:
         print("WARNING: contrastive_loss enabled but contrastive_weight=0. Setting to 0.01")
         config["contrastive_weight"] = 0.01
     config["use_contrastive_loss"] = True
-    config["use_hierarchy_loss"] = False
     print("Using contrastive DeepSDF training.")
 else:
     from NSM.train.train_deep_sdf import train_deep_sdf
-    config["contrastive_weight"] = 0
-    config["hierarchy_weight"] = 0
     config["use_contrastive_loss"] = False
     config["use_hierarchy_loss"] = False
     print("Using standard DeepSDF training.")
