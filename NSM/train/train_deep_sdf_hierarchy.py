@@ -61,7 +61,7 @@ def _write_epoch_losses_csv(log_dict, fpath):
         "l1_loss",
         "latent_code_regularization_loss",
         "eikonal_loss",
-        "hierarchy_contrastive_loss",
+        "hierarchy_loss",
         "classification_head_loss",
     ]
     surf_keys = sorted([k for k in log_dict if k.startswith("l1_loss_")])
@@ -90,10 +90,10 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
 
     # hierarchy defaults
     config.setdefault("hierarchy_loss_enabled", True)
-    config.setdefault("hierarchy_contrastive_weight", config.get("hierarchy_weight", 0.01))
-    config.setdefault("hierarchy_contrastive_warmup", config.get("hierarchy_warmup", 200))
+    config.setdefault("hierarchy_weight", config.get("hierarchy_weight", 0.01))
+    config.setdefault("hierarchy_warmup", config.get("hierarchy_warmup", 200))
     config.setdefault(
-        "hierarchy_contrastive_margins",
+        "hierarchy_margins",
         config.get("hierarchy_margins", {0: 0.0, 1: 1.0, 2: 2.0, 3: 4.0}),
     )
     config.setdefault("classification_heads_enabled", True)
@@ -117,7 +117,7 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
     hierarchy_contrastive = None
     if config.get("hierarchy_loss_enabled", False):
         hierarchy_contrastive = HierarchyContrastiveLoss(
-            margins=config["hierarchy_contrastive_margins"]
+            margins=config["hierarchy_margins"]
         )
 
     classification_heads = None
@@ -404,14 +404,14 @@ def train_epoch(
         hierarchy_term = None
         if config.get("hierarchy_loss_enabled", False) and hierarchy_contrastive is not None:
             per_object_vecs = latent_vecs(original_object_indices)
-            warmup = min(1.0, epoch / config["hierarchy_contrastive_warmup"])
+            warmup = min(1.0, epoch / config["hierarchy_warmup"])
             h_loss = hierarchy_contrastive(
                 per_object_vecs,
                 original_object_indices,
                 taxonomy_encoder,
                 device=config["device"],
             )
-            hierarchy_term = config["hierarchy_contrastive_weight"] * warmup * h_loss
+            hierarchy_term = config["hierarchy_weight"] * warmup * h_loss
             batch_hierarchy_loss += hierarchy_term.item()
 
         cls_term = None
@@ -607,7 +607,7 @@ def train_epoch(
     print("\t save code loss: ", save_code_reg_loss)
     if config.get("eikonal_weight", 0) > 0:
         print(f"\t save eikonal loss: {save_eikonal_loss:.6f}")
-    print(f"\t save hierarchy contrastive loss: {save_hierarchy_loss:.6f}")
+    print(f"\t save hierarchy loss: {save_hierarchy_loss:.6f}")
     print(f"\t save classification head loss: {save_cls_loss:.6f}")
     for k, v in step_cls_losses.items():
         print(f"\t\t {k}: {v / n_batches:.6f}")
@@ -619,7 +619,7 @@ def train_epoch(
         "epoch_time_s": seconds_elapsed,
         "l1_loss": save_l1_loss,
         "latent_code_regularization_loss": save_code_reg_loss,
-        "hierarchy_contrastive_loss": save_hierarchy_loss,
+        "hierarchy_loss": save_hierarchy_loss,
         "classification_head_loss": save_cls_loss,
         "mean_size": step_mean_size / n_batches,
         "mean_load_time": step_mean_load_time / n_batches,
