@@ -22,6 +22,14 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
 
         ShapeCompletionLogic.installDependenciesIfNeeded()
 
+        # Compute default paths relative to the project root (run_v44)
+        projectRoot = os.path.dirname(os.path.dirname(__file__))
+        defaultRunDir = os.path.join(projectRoot, "run_v44")
+        defaultConfig = os.path.join(defaultRunDir, "model_params_config.json")
+        defaultModel = os.path.join(defaultRunDir, "model", "3000.pth")
+        defaultLatents = os.path.join(defaultRunDir, "latent_codes", "3000.pth")
+        defaultOutput = os.path.join(defaultRunDir, "shape_completion", "predictions")
+
         # Form Layout
         inputCollapsible = ctk.ctkCollapsibleButton()
         inputCollapsible.text = "Inputs"
@@ -67,6 +75,41 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
         self.outputFolderLabel.setWordWrap(True)
         inputLayout.addRow("Output Folder:", self.outputFolderButton)
         inputLayout.addRow("", self.outputFolderLabel)
+
+        # Optimization Settings Collapsible Layout
+        optimCollapsible = ctk.ctkCollapsibleButton()
+        optimCollapsible.text = "Optimization Settings"
+        optimCollapsible.collapsed = True
+        self.layout.addWidget(optimCollapsible)
+        optimLayout = qt.QFormLayout(optimCollapsible)
+
+        # Sample Points
+        self.nSamplesOptInput = qt.QLineEdit("240")
+        optimLayout.addRow("Sample Points:", self.nSamplesOptInput)
+
+        # Phase 1
+        self.phase1ItersInput = qt.QLineEdit("3000")
+        optimLayout.addRow("Phase 1 Iterations:", self.phase1ItersInput)
+
+        self.phase1LrInput = qt.QLineEdit("1e-4")
+        optimLayout.addRow("Phase 1 Learning Rate:", self.phase1LrInput)
+
+        self.phase1LambdaInput = qt.QLineEdit("1e-3")
+        optimLayout.addRow("Phase 1 Lambda Reg:", self.phase1LambdaInput)
+
+        # Phase 2
+        self.phase2ItersInput = qt.QLineEdit("8000")
+        optimLayout.addRow("Phase 2 Iterations:", self.phase2ItersInput)
+
+        self.phase2LrInput = qt.QLineEdit("1e-5")
+        optimLayout.addRow("Phase 2 Learning Rate:", self.phase2LrInput)
+
+        self.phase2LambdaInput = qt.QLineEdit("1e-5")
+        optimLayout.addRow("Phase 2 Lambda Reg:", self.phase2LambdaInput)
+
+        # Resolution
+        self.nPtsPerAxisInput = qt.QLineEdit("256")
+        optimLayout.addRow("Resolution (pts/axis):", self.nPtsPerAxisInput)
 
         # Uncertainty Collapsible Layout
         uncertaintyCollapsible = ctk.ctkCollapsibleButton()
@@ -182,12 +225,23 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
 
         self.layout.addStretch(1)
 
-        # Internal state
-        self.configFilePath = None
-        self.modelFilePath = None
-        self.latentCodesFilePath = None
+        # Internal state — pre-fill with defaults if they exist on disk
+        self.configFilePath = defaultConfig if os.path.isfile(defaultConfig) else None
+        self.modelFilePath = defaultModel if os.path.isfile(defaultModel) else None
+        self.latentCodesFilePath = defaultLatents if os.path.isfile(defaultLatents) else None
         self.inputFilePath = None
-        self.outputFolderPath = None
+        self.outputFolderPath = defaultOutput if os.path.isdir(defaultOutput) else None
+
+        # Update labels to reflect pre-filled defaults
+        if self.configFilePath:
+            self.configFileLabel.setText(self.configFilePath)
+        if self.modelFilePath:
+            self.modelFileLabel.setText(self.modelFilePath)
+        if self.latentCodesFilePath:
+            self.latentCodesFileLabel.setText(self.latentCodesFilePath)
+        if self.outputFolderPath:
+            self.outputFolderLabel.setText(self.outputFolderPath)
+        self.updateRunButton()
 
     # Toggle Uncertainty Inputs
     def onToggleUncertaintyOptions(self, state=None):
@@ -282,7 +336,16 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
             "--model", self.modelFilePath,
             "--latent_codes", self.latentCodesFilePath,
             "--input_mesh", self.inputFilePath,
-            "--output_folder", self.outputFolderPath
+            "--output_folder", self.outputFolderPath,
+            # Optimization settings
+            "--n_samples", self.nSamplesOptInput.text,
+            "--phase1_iters", self.phase1ItersInput.text,
+            "--phase1_lr", self.phase1LrInput.text,
+            "--phase1_lambda_reg", self.phase1LambdaInput.text,
+            "--phase2_iters", self.phase2ItersInput.text,
+            "--phase2_lr", self.phase2LrInput.text,
+            "--phase2_lambda_reg", self.phase2LambdaInput.text,
+            "--n_pts_per_axis", self.nPtsPerAxisInput.text,
         ]
         if self.estimateUncertaintyCheckbox.isChecked():
             cmd.append("--estimate_uncertainty")
