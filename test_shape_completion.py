@@ -16,6 +16,16 @@ NSM_PATH = os.path.join(PROJECT_ROOT, 'NSM')
 if NSM_PATH not in sys.path:
     sys.path.insert(0, NSM_PATH)
 
+# Mock wandb to prevent ImportError when importing NSM.uncertainty
+import types
+if 'wandb' not in sys.modules:
+    mock_wandb = types.ModuleType('wandb')
+    mock_wandb.Object3D = lambda *args, **kwargs: None
+    sys.modules['wandb'] = mock_wandb
+
+# Pre-import uncertainty so patch decorators can find it
+import NSM.uncertainty as uncert
+
 from shape_completion_slicer import pv_to_tiny3d, main
 
 class TestShapeCompletion(unittest.TestCase):
@@ -133,7 +143,7 @@ class TestShapeCompletion(unittest.TestCase):
     @patch('NSM.mesh.create_mesh')
     @patch('NSM.optimization.get_norm_params')
     @patch('NSM.optimization.normalize_mesh')
-    @patch('shape_completion_slicer.convert_ply_to_vtk', create=True)
+    @patch('NSM.helper_funcs.convert_ply_to_vtk')
     def test_main_pipeline_ply(self, mock_convert_ply, mock_normalize_mesh, mock_get_norm_params, mock_create_mesh,
                                mock_optimize_latent, mock_sdf_samples, mock_get_top_k_pcs,
                                mock_load_model_latents, mock_load_config):
@@ -165,6 +175,10 @@ class TestShapeCompletion(unittest.TestCase):
         
         # Mock ply to vtk converter
         mock_convert_ply.return_value = (mock_mesh, os.path.join(self.temp_dir, "input.vtk"))
+        
+        # Explicitly bind convert_ply_to_vtk to the module level in case we are on the original codebase
+        import shape_completion_slicer
+        shape_completion_slicer.convert_ply_to_vtk = mock_convert_ply
         
         # Setup temp files
         dummy_config = os.path.join(self.temp_dir, "config.json")
@@ -301,6 +315,194 @@ class TestShapeCompletion(unittest.TestCase):
         # Verify random.sample was called to pick 5 meshes
         mock_random_sample.assert_called_once()
         self.assertEqual(mock_optimize_latent.call_count, 10) # 2 phases per mesh, for 5 meshes = 10 calls
+
+    @patch('NSM.helper_funcs.load_config')
+    @patch('NSM.helper_funcs.load_model_and_latents')
+    @patch('NSM.optimization.get_top_k_pcs')
+    @patch('NSM.datasets.SDFSamples')
+    @patch('NSM.optimization.optimize_latent_partial')
+    @patch('NSM.mesh.create_mesh')
+    @patch('NSM.optimization.get_norm_params')
+    @patch('NSM.optimization.normalize_mesh')
+    @patch('NSM.uncertainty.LaplaceApproximator')
+    @patch('NSM.uncertainty.AnalyticalUncertainty')
+    @patch('NSM.uncertainty.decimate_mesh')
+    def test_main_pipeline_uncertainty_analytical(self, mock_decimate, mock_analytical_prop, mock_laplace,
+                                                  mock_normalize_mesh, mock_get_norm_params, mock_create_mesh,
+                                                  mock_optimize_latent, mock_sdf_samples, mock_get_top_k_pcs,
+                                                  mock_load_model_latents, mock_load_config):
+        """Test uncertainty estimation pipeline in analytical propagation mode."""
+        mock_load_config.return_value = self._get_mock_config()
+        mock_model = MagicMock()
+        mock_latent_codes = torch.zeros(5, 256)
+        mock_load_model_latents.return_value = (mock_model, None, mock_latent_codes)
+        mock_get_top_k_pcs.return_value = (None, torch.zeros(5, 256))
+        
+        mock_dataset_inst = MagicMock()
+        mock_sample_dict = {'xyz': torch.zeros(1000, 3), 'gt_sdf': torch.zeros(1000, 1)}
+        mock_dataset_inst.__getitem__.return_value = (mock_sample_dict, None)
+        mock_sdf_samples.return_value = mock_dataset_inst
+        mock_optimize_latent.return_value = (torch.zeros(1, 256), None)
+        
+        points = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+        faces = np.array([3, 0, 1, 2], dtype=np.int32)
+        mock_mesh = pv.PolyData(points, faces)
+        mock_create_mesh.return_value = mock_mesh
+        mock_get_norm_params.return_value = (np.array([0.0, 0.0, 0.0]), 1.0)
+        mock_normalize_mesh.return_value = mock_mesh
+        
+        # Setup mock Laplace and Propagator
+        mock_laplace_inst = MagicMock()
+        mock_laplace_inst.covariance.return_value = (torch.eye(256), None)
+        mock_laplace.return_value = mock_laplace_inst
+        
+        mock_prop_inst = MagicMock()
+        mock_prop_inst.sdf_uncertainty.return_value = torch.ones(3)
+        mock_analytical_prop.return_value = mock_prop_inst
+        
+        mock_decimate.return_value = mock_mesh
+        
+        # Setup files
+        dummy_config = os.path.join(self.temp_dir, "config.json")
+        dummy_model = os.path.join(self.temp_dir, "model.pth")
+        dummy_latents = os.path.join(self.temp_dir, "latents.pth")
+        dummy_mesh = os.path.join(self.temp_dir, "input.vtk")
+        for fpath in [dummy_config, dummy_model, dummy_latents, dummy_mesh]:
+            with open(fpath, 'w') as f: f.write('')
+            
+        main(
+            config_path=dummy_config,
+            model_path=dummy_model,
+            latent_codes_path=dummy_latents,
+            input_mesh_path=dummy_mesh,
+            output_folder_path=self.temp_dir,
+            estimate_uncertainty=True,
+            propagation_mode='analytical',
+            data_std=2e-5,
+            latent_prior_std=5e-4,
+            data_weight=1.0,
+            latent_weight=1.0,
+            mc_samples=2000,
+            n_triangles=5000
+        )
+        
+        # Verify decimate was called
+        mock_decimate.assert_called_once()
+        # Verify covariance was called
+        mock_laplace_inst.covariance.assert_called_once_with(
+            data_std=2e-5,
+            latent_std=5e-4,
+            data_weight=1.0,
+            latent_weight=1.0,
+            n_samples=2000,
+            recompute_jacobian=False
+        )
+        # Verify uncertainty propagation was called
+        mock_prop_inst.sdf_uncertainty.assert_called_once()
+        
+        # Verify outputs created
+        output_mesh_path = os.path.join(self.temp_dir, "input_shape_completion_unc.vtk")
+        done_file_path = os.path.join(self.temp_dir, "input.done")
+        self.assertTrue(os.path.exists(output_mesh_path))
+        self.assertTrue(os.path.exists(done_file_path))
+        with open(done_file_path, 'r') as f:
+            self.assertEqual(f.read().strip(), output_mesh_path)
+
+    @patch('NSM.helper_funcs.load_config')
+    @patch('NSM.helper_funcs.load_model_and_latents')
+    @patch('NSM.optimization.get_top_k_pcs')
+    @patch('NSM.datasets.SDFSamples')
+    @patch('NSM.optimization.optimize_latent_partial')
+    @patch('NSM.mesh.create_mesh')
+    @patch('NSM.optimization.get_norm_params')
+    @patch('NSM.optimization.normalize_mesh')
+    @patch('NSM.uncertainty.LaplaceApproximator')
+    @patch('NSM.uncertainty.MonteCarloUncertainty')
+    @patch('NSM.uncertainty.decimate_mesh')
+    def test_main_pipeline_uncertainty_montecarlo(self, mock_decimate, mock_mc_prop, mock_laplace,
+                                                  mock_normalize_mesh, mock_get_norm_params, mock_create_mesh,
+                                                  mock_optimize_latent, mock_sdf_samples, mock_get_top_k_pcs,
+                                                  mock_load_model_latents, mock_load_config):
+        """Test uncertainty estimation pipeline in Monte Carlo propagation mode."""
+        mock_load_config.return_value = self._get_mock_config()
+        mock_model = MagicMock()
+        mock_latent_codes = torch.zeros(5, 256)
+        mock_load_model_latents.return_value = (mock_model, None, mock_latent_codes)
+        mock_get_top_k_pcs.return_value = (None, torch.zeros(5, 256))
+        
+        mock_dataset_inst = MagicMock()
+        mock_sample_dict = {'xyz': torch.zeros(1000, 3), 'gt_sdf': torch.zeros(1000, 1)}
+        mock_dataset_inst.__getitem__.return_value = (mock_sample_dict, None)
+        mock_sdf_samples.return_value = mock_dataset_inst
+        mock_optimize_latent.return_value = (torch.zeros(1, 256), None)
+        
+        points = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+        faces = np.array([3, 0, 1, 2], dtype=np.int32)
+        mock_mesh = pv.PolyData(points, faces)
+        mock_create_mesh.return_value = mock_mesh
+        mock_get_norm_params.return_value = (np.array([0.0, 0.0, 0.0]), 1.0)
+        mock_normalize_mesh.return_value = mock_mesh
+        
+        # Setup mock Laplace and Propagator
+        mock_laplace_inst = MagicMock()
+        mock_laplace_inst.covariance.return_value = (torch.eye(256), None)
+        mock_laplace.return_value = mock_laplace_inst
+        
+        mock_prop_inst = MagicMock()
+        mock_prop_inst.sdf_uncertainty.return_value = torch.ones(3)
+        mock_mc_prop.return_value = mock_prop_inst
+        
+        mock_decimate.return_value = mock_mesh
+        
+        # Setup files
+        dummy_config = os.path.join(self.temp_dir, "config.json")
+        dummy_model = os.path.join(self.temp_dir, "model.pth")
+        dummy_latents = os.path.join(self.temp_dir, "latents.pth")
+        dummy_mesh = os.path.join(self.temp_dir, "input.vtk")
+        for fpath in [dummy_config, dummy_model, dummy_latents, dummy_mesh]:
+            with open(fpath, 'w') as f: f.write('')
+            
+        main(
+            config_path=dummy_config,
+            model_path=dummy_model,
+            latent_codes_path=dummy_latents,
+            input_mesh_path=dummy_mesh,
+            output_folder_path=self.temp_dir,
+            estimate_uncertainty=True,
+            propagation_mode='montecarlo',
+            data_std=2e-5,
+            latent_prior_std=5e-4,
+            data_weight=1.0,
+            latent_weight=1.0,
+            mc_samples=1500,
+            n_triangles=4000
+        )
+        
+        # Verify decimate was called
+        mock_decimate.assert_called_once()
+        # Verify covariance was called
+        mock_laplace_inst.covariance.assert_called_once_with(
+            data_std=2e-5,
+            latent_std=5e-4,
+            data_weight=1.0,
+            latent_weight=1.0,
+            n_samples=2000,
+            recompute_jacobian=False
+        )
+        # Verify uncertainty propagation was called
+        mock_prop_inst.sdf_uncertainty.assert_called_once()
+        
+        # Check that it was called with mc_samples=1500
+        args, kwargs = mock_prop_inst.sdf_uncertainty.call_args
+        self.assertEqual(kwargs.get('n_samples'), 1500)
+        
+        # Verify outputs created
+        output_mesh_path = os.path.join(self.temp_dir, "input_shape_completion_unc.vtk")
+        done_file_path = os.path.join(self.temp_dir, "input.done")
+        self.assertTrue(os.path.exists(output_mesh_path))
+        self.assertTrue(os.path.exists(done_file_path))
+        with open(done_file_path, 'r') as f:
+            self.assertEqual(f.read().strip(), output_mesh_path)
 
 if __name__ == '__main__':
     unittest.main()

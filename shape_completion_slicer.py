@@ -21,7 +21,9 @@ def pv_to_tiny3d(mesh_pv):
     mesh_o3d.compute_vertex_normals()
     return mesh_o3d
 
-def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_path=None, output_folder_path=None):
+def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_path=None, output_folder_path=None,
+         estimate_uncertainty=False, propagation_mode='analytical', data_std=2e-5, latent_prior_std=5e-4,
+         data_weight=1.0, latent_weight=1.0, mc_samples=2000, n_triangles=5000):
     USE_TINY3D = True  # Set this flag based on Slicer environment
 
     # Dynamically import open3d/tiny3d depending on USE_TINY3D
@@ -46,7 +48,8 @@ def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_p
         load_config, 
         load_model_and_latents, 
         fixed_point_coords, 
-        safe_load_mesh_scalars
+        safe_load_mesh_scalars,
+        convert_ply_to_vtk
     )
     from NSM.optimization import (
         get_top_k_pcs,
@@ -173,19 +176,84 @@ def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_p
         # Normalize and scale output using model config training params
         center, max_radius = get_norm_params(sdf_dataset, sample_dict, vert_fname)
         mesh_pv = normalize_mesh(mesh_out, vert_fname, config, center, max_radius)
-
-        # Save mesh
         mesh_pv = mesh_pv.clean()
         mesh_pv = mesh_pv.triangulate()
-        output_path = outfpath + "/" + os.path.splitext(os.path.basename(vert_fname))[0] + "_shape_completion.vtk"
-        # Set color: RGB in range 0–255 or 0–1
-        color = np.array([112, 215, 222], dtype=np.uint8)  
-        # Broadcast color to all points
-        rgb = np.tile(color, (mesh_pv.n_points, 1))
-        mesh_pv.point_data.clear()
-        mesh_pv.point_data['Colors'] = rgb
-        mesh_pv.save(output_path)
-        print(f"Completed mesh from partial pointcloud saved to: {output_path}")
+
+        if estimate_uncertainty:
+            import sys
+            import types
+            # Mock wandb to prevent ImportError when importing NSM.reconstruct.main
+            if 'wandb' not in sys.modules:
+                try:
+                    import wandb
+                except ImportError:
+                    mock_wandb = types.ModuleType('wandb')
+                    mock_wandb.Object3D = lambda *args, **kwargs: None
+                    sys.modules['wandb'] = mock_wandb
+
+            import NSM.uncertainty as uncert
+            
+            print("\n-----Estimating Uncertainty-----\n")
+            # 1. Initialize Laplace approximator
+            laplace = uncert.LaplaceApproximator(model, latent_partial, vert_fname, config, device, verbose=True)
+            
+            # 2. Compute approximate covariance of latent posterior
+            print("Computing covariance matrix using Laplace approximation...")
+            covariance, hessian = laplace.covariance(
+                data_std=data_std, 
+                latent_std=latent_prior_std, 
+                data_weight=data_weight, 
+                latent_weight=latent_weight, 
+                n_samples=2000, 
+                recompute_jacobian=False
+            )
+            
+            # 3. Initialize propagator
+            if propagation_mode == 'analytical':
+                propagator = uncert.AnalyticalUncertainty(model, latent_partial, device, verbose=True)
+            else:
+                propagator = uncert.MonteCarloUncertainty(model, latent_partial, device, verbose=True)
+                
+            # 4. Decimate the completed mesh to speed up uncertainty computation
+            print(f"Decimating reconstructed mesh to {n_triangles} triangles...")
+            recon_mesh_dec = uncert.decimate_mesh(mesh_pv, n_triangles=n_triangles, verbose=True)
+
+            # Clean/triangulate BEFORE computing uncertainty
+            recon_mesh_dec = recon_mesh_dec.clean()
+            recon_mesh_dec = recon_mesh_dec.triangulate()
+            
+            # 5. Propagate covariance to get SDF uncertainty at vertices
+            print(f"Propagating covariance using {propagation_mode} mode...")
+            if propagation_mode == 'analytical':
+                surface_sdf_std = propagator.sdf_uncertainty(covariance, recon_mesh_dec.points, recompute_gradients=False)
+            else:
+                surface_sdf_std = propagator.sdf_uncertainty(covariance, recon_mesh_dec.points, n_samples=mc_samples)
+                
+            # 6. Set SdfUncertainty scalar field
+            # Raw SDF uncertainty
+            unc_raw = surface_sdf_std.detach().cpu().numpy().astype(np.float32)
+
+            # Micro-unit version for nicer Slicer visualization
+            unc_um = unc_raw * 1e6
+
+            recon_mesh_dec.point_data['SdfUncertainty'] = unc_raw
+            recon_mesh_dec.point_data['SdfUncertainty_um'] = unc_um
+            
+            # 7. Save the decimated mesh with uncertainty
+            output_path = outfpath + "/" + os.path.splitext(os.path.basename(vert_fname))[0] + "_shape_completion_unc.vtk"
+            recon_mesh_dec.save(output_path)
+            print(f"Completed mesh with uncertainty saved to: {output_path}")
+        else:
+            # Save mesh
+            output_path = outfpath + "/" + os.path.splitext(os.path.basename(vert_fname))[0] + "_shape_completion.vtk"
+            # Set color: RGB in range 0–255 or 0–1
+            color = np.array([112, 215, 222], dtype=np.uint8)  
+            # Broadcast color to all points
+            rgb = np.tile(color, (mesh_pv.n_points, 1))
+            mesh_pv.point_data.clear()
+            mesh_pv.point_data['Colors'] = rgb
+            mesh_pv.save(output_path)
+            print(f"Completed mesh from partial pointcloud saved to: {output_path}")
 
         with open(os.path.join(outfpath, os.path.splitext(os.path.basename(vert_fname))[0] + ".done"), "w") as f:
             f.write(output_path)
@@ -197,14 +265,46 @@ if __name__ == "__main__":
     if modulePath not in sys.path:
         sys.path.insert(0, modulePath)
 
-    if len(sys.argv) < 6:
-        print("No command line arguments provided. Running with default parameters")
-        main()
-    else:
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default=None)
+    parser.add_argument('--model', type=str, default=None)
+    parser.add_argument('--latent_codes', type=str, default=None)
+    parser.add_argument('--input_mesh', type=str, default=None)
+    parser.add_argument('--output_folder', type=str, default=None)
+    parser.add_argument('--estimate_uncertainty', action='store_true')
+    parser.add_argument('--propagation_mode', type=str, default='analytical')
+    parser.add_argument('--data_std', type=float, default=2e-5)
+    parser.add_argument('--latent_prior_std', type=float, default=5e-4)
+    parser.add_argument('--data_weight', type=float, default=1.0)
+    parser.add_argument('--latent_weight', type=float, default=1.0)
+    parser.add_argument('--mc_samples', type=int, default=2000)
+    parser.add_argument('--n_triangles', type=int, default=5000)
+
+    # Check if we are using positional args or argparse format
+    if len(sys.argv) == 6 and not sys.argv[1].startswith('-'):
+        # Fallback to positional arguments
         main(
             config_path=sys.argv[1],
             model_path=sys.argv[2],
             latent_codes_path=sys.argv[3],
             input_mesh_path=sys.argv[4],
             output_folder_path=sys.argv[5]
+        )
+    else:
+        args = parser.parse_args()
+        main(
+            config_path=args.config,
+            model_path=args.model,
+            latent_codes_path=args.latent_codes,
+            input_mesh_path=args.input_mesh,
+            output_folder_path=args.output_folder,
+            estimate_uncertainty=args.estimate_uncertainty,
+            propagation_mode=args.propagation_mode,
+            data_std=args.data_std,
+            latent_prior_std=args.latent_prior_std,
+            data_weight=args.data_weight,
+            latent_weight=args.latent_weight,
+            mc_samples=args.mc_samples,
+            n_triangles=args.n_triangles
         )
