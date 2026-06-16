@@ -1,14 +1,18 @@
+# Generate a video inspecting meshes
 
 import os
 import pyvista as pv
 import cv2
 import numpy as np
+from pathlib import Path
 
-# --- Settings ---
-MESH_DIR = "vertebrae_meshes"   # folder with your meshes
+# --- Define parameters ---
+cwd = Path.cwd()
+base_wd = cwd.parent 
+MESH_DIR = base_wd / "vertebrae_meshes"   # folder with your meshes
 FPS = 15
 OUT_VIDEO = "inspect_meshes_front.mp4"
-DURATION_PER_MESH = 1.0
+DURATION_PER_MESH = 1.0 # Seconds
 WIDTH, HEIGHT = 640, 480
 TEXT_COLOR = (0, 0, 0)
 FONT_SCALE = 0.5
