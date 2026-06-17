@@ -8,12 +8,15 @@ import io
 from PIL import Image
 from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_and_latents, render_cameras, generate_and_render_mesh
 from NSM.traverse_latents import generate_latent_path_plot
+from pathlib import Path
 
 # Define PC index and model checkpoint to use for video generation
-TRAIN_DIR = "run_v47" # TO DO: Choose training directory containing model ckpt and latent codes
+cwd = Path.cwd()
+base_wd = cwd.parent 
+TRAIN_DIR = base_wd / "run_v57" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
-PC_idx = 0   # TO DO: Choose PC index for PC of interest (ex: For PC1, choose 0)
-CKPT = '2000' # TO DO: Choose the ckpt value you want to analyze results for
+PC_idx = 2   # TO DO: Choose PC index for PC of interest (ex: For PC1, choose 0)
+CKPT = '3000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
 
@@ -89,10 +92,11 @@ for i, alpha in enumerate(alpha_vals):
         # Generate and render mesh
         mesh_o3d = generate_and_render_mesh(new_latent_np, total_frames, i, device, model, n_pts_per_axis, 
                                             voxel_origin, voxel_size, offset, scale, icp_transform, objects, generated_mesh_count)
+        generated_mesh_count += 1
         # Render views of model for video
         combined = render_cameras(renderers, mesh_o3d, i, material, total_frames, n_rotations)
         # Generate latent path plot image
-        latent_path_img = generate_latent_path_plot(projections, proj_val, min_proj, max_proj, width=200, height=80)
+        latent_path_img = generate_latent_path_plot(projections, proj_val, min_proj, max_proj, PC_idx, width=200, height=80)
         latent_path_img_bgr = cv2.cvtColor(latent_path_img, cv2.COLOR_RGB2BGR)
 
         # Overlay latent_path_img in the middle of the 2x2 grid

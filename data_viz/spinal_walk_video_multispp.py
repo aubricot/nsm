@@ -14,11 +14,14 @@ from scipy.spatial.distance import cdist
 import re
 from scipy.signal import savgol_filter
 from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_and_latents
+from pathlib import Path
 
 # Define PC index and model checkpoint to use for video generation
-TRAIN_DIR = "run_v41" # TO DO: Choose training directory containing model ckpt and latent codes
+cwd = Path.cwd()
+base_wd = cwd.parent 
+TRAIN_DIR = base_wd / "run_v57" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
-CKPT = '1000' # TO DO: Choose the ckpt value you want to analyze results for
+CKPT = '2000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
 

@@ -20,11 +20,14 @@ from sklearn.neighbors import NearestNeighbors
 from scipy.spatial.distance import cdist
 from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_and_latents 
 from NSM.traverse_latents import sample_latent_grid, solve_tsp_nearest_neighbor, interpolate_latent_loop
+from pathlib import Path
 
 # Define parameters
-TRAIN_DIR = "run_v41" # TO DO: Choose training directory containing model ckpt and latent codes
+cwd = Path.cwd()
+base_wd = cwd.parent 
+TRAIN_DIR = base_wd / "run_v57" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
-CKPT = '1000' # TO DO: Choose model checkpoint to load
+CKPT = '3000' # TO DO: Choose model checkpoint to load
 LC_PATH = f'latent_codes/{CKPT}.pth'
 MODEL_PATH = f'model/{CKPT}.pth'
 NUM_GRIDS_X = 8 # TO DO: Adjust based on desired grid format

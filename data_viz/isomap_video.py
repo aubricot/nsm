@@ -13,9 +13,12 @@ import re
 from scipy.signal import savgol_filter
 from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_and_latents, average_across_regions, overlay_text_on_frame, render_cameras, generate_and_render_mesh
 from NSM.traverse_latents import sample_latent_grid, solve_tsp_nearest_neighbor, interpolate_latent_loop, project_to_isomap, resample_by_cumulative_distance, plot_latent_paths
+from pathlib import Path
 
 # Define model parameters to use for video generation
-TRAIN_DIR = "run_v47" # TO DO: Choose training directory containing model ckpt and latent codes
+cwd = Path.cwd()
+base_wd = cwd.parent 
+TRAIN_DIR = base_wd / "run_v57" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
 CKPT = '2000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
@@ -158,6 +161,7 @@ for i, latent_code in enumerate(loop_sequence):
         mesh_o3d = generate_and_render_mesh(latent_code, len(loop_sequence), i, device, model, n_pts_per_axis, 
                                             voxel_origin, voxel_size, offset, scale, icp_transform, objects, 
                                             generated_mesh_count, loop_sequence_names)
+        generated_mesh_count += 1
         # Render views of model for video
         combined = render_cameras(renderers, mesh_o3d, i, material, len(loop_sequence), n_rotations)
         # Overlay specimen name info onto each frame

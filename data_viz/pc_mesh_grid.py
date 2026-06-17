@@ -10,15 +10,18 @@ import gc
 from NSM.mesh import create_mesh
 from NSM.models import TriplanarDecoder
 from NSM.helper_funcs import NumpyTransform, pv_to_o3d, load_config, load_model_and_latents
+from pathlib import Path
 
 # --- Configuration for the grid image ---
-TRAIN_DIR = "run_v47" # TO DO: Choose training directory containing model ckpt and latent codes
+cwd = Path.cwd()
+base_wd = cwd.parent 
+TRAIN_DIR = base_wd / "run_v57" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
-CKPT = '2000' # TO DO: Choose the ckpt value you want to analyze results for
+CKPT = '3000' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
-NUM_STEPS_PC0 = 8
-NUM_STEPS_PC1 = 8
+NUM_STEPS_PC0 = 5
+NUM_STEPS_PC1 = 5
 IMG_WIDTH_PER_MESH = 512
 IMG_HEIGHT_PER_MESH = 512
 PC_INDEX_0 = 0 # TO DO: change to inspect other PCs
@@ -121,7 +124,7 @@ def main():
         for j, s0_val in enumerate(pc0_score_range):
             generated_mesh_count += 1
             print(f"\033[92m\nGenerating mesh {generated_mesh_count}/{total_meshes_to_generate}\033[0m"
-                  f"(PC{PC_INDEX_0 + 1}={s0_val:.2f}, PC{PC_INDEX_1 + 1}={s1_val:.2f})...", end="")
+                  f"\n(PC{PC_INDEX_0 + 1}={s0_val:.2f}, PC{PC_INDEX_1 + 1}={s1_val:.2f})...", end="")
 
             # Set background color
             current_bg_to_set = list(base_bg_color_np) + [1.0] # Default background
@@ -162,8 +165,7 @@ def main():
                     decoder=mdl, latent_vector=latent_tensor, n_pts_per_axis=MESH_RESOLUTION_N,
                     voxel_origin=voxel_origin, voxel_size=voxel_size,
                     path_original_mesh=None, offset=offset, scale=scale,
-                    icp_transform=icp, objects=objs, verbose=False, device=dev
-                )
+                    icp_transform=icp, objects=objs, verbose=False, device=dev)
                 
                 m_inter = mesh_data_from_decoder[0] if isinstance(mesh_data_from_decoder, list) else mesh_data_from_decoder
 
@@ -196,7 +198,7 @@ def main():
                     max_dim_extent = np.max(bounds.get_extent())
                     if max_dim_extent < 1e-3: max_dim_extent = 1.0
 
-                    eye = center + np.array([1.0, 1.0, 0.8]) * max_dim_extent * EYE_OFFSET_FACTOR
+                    eye = center + np.array([-1.0, -1.0, 0.3]) * max_dim_extent * EYE_OFFSET_FACTOR
                     up_vector = np.array([0.0, 0.0, 1.0])
                     
                     ren.scene.camera.look_at(center, eye, up_vector)
@@ -225,7 +227,7 @@ def main():
         if current_row_image_list:
             h_stitched_row = np.hstack(current_row_image_list)
             all_rows_images.append(h_stitched_row)
-
+            
     # Build and save the grid
     if all_rows_images:
         final_grid_image = np.vstack(all_rows_images)
