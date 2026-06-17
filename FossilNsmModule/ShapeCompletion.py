@@ -17,18 +17,19 @@ class ShapeCompletion(ScriptedLoadableModule):
 
 
 class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
+
     def setup(self):
         super().setup()
 
-        ShapeCompletionLogic.installDependenciesIfNeeded()
+        # Initialize states
+        self.modelRootPath = None
+        self.inputFilePath = None
+        self.configFilePath = None
+        self.modelFilePath = None
+        self.latentCodesFilePath = None
+        self.outputFolderPath = None
 
-        # Compute default paths relative to the project root (run_v44)
-        projectRoot = os.path.dirname(os.path.dirname(__file__))
-        defaultRunDir = os.path.join(projectRoot, "run_v44")
-        defaultConfig = os.path.join(defaultRunDir, "model_params_config.json")
-        defaultModel = os.path.join(defaultRunDir, "model", "3000.pth")
-        defaultLatents = os.path.join(defaultRunDir, "latent_codes", "3000.pth")
-        defaultOutput = os.path.join(defaultRunDir, "shape_completion", "predictions")
+        ShapeCompletionLogic.installDependenciesIfNeeded()
 
         # Form Layout
         inputCollapsible = ctk.ctkCollapsibleButton()
@@ -36,45 +37,43 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
         self.layout.addWidget(inputCollapsible)
         inputLayout = qt.QFormLayout(inputCollapsible)
 
-        # Config File
-        self.configFileButton = qt.QPushButton("Select Config File...")
-        self.configFileButton.connect("clicked(bool)", self.onSelectConfigFile)
-        self.configFileLabel = qt.QLabel("No file selected")
+        # Model Root (ex: run_v44)
+        self.modelRootButton = qt.QPushButton("Select Model Root (run_vXX)...")
+        self.modelRootLabel = qt.QLabel("No model selected")
+        inputLayout.addRow("Model Root:", self.modelRootButton)
+        inputLayout.addRow("", self.modelRootLabel)
+        self.modelRootButton.connect("clicked(bool)", self.onSelectModelRoot)
+
+        # Validation output
+        self.modelChecklist = qt.QPlainTextEdit()
+        self.modelChecklist.setReadOnly(True)
+        self.modelChecklist.setFixedHeight(110)
+        inputLayout.addRow("Model Validation:", self.modelChecklist)
+
+        # Derived paths (READ ONLY)
+        self.configFileLabel = qt.QLabel("Not set")
         self.configFileLabel.setWordWrap(True)
-        inputLayout.addRow("Config File:", self.configFileButton)
-        inputLayout.addRow("", self.configFileLabel)
+        inputLayout.addRow("Config File:", self.configFileLabel)
 
-        # Model File
-        self.modelFileButton = qt.QPushButton("Select Model File...")
-        self.modelFileButton.connect("clicked(bool)", self.onSelectModelFile)
-        self.modelFileLabel = qt.QLabel("No file selected")
+        self.modelFileLabel = qt.QLabel("Not set")
         self.modelFileLabel.setWordWrap(True)
-        inputLayout.addRow("Model File:", self.modelFileButton)
-        inputLayout.addRow("", self.modelFileLabel)
+        inputLayout.addRow("Model File:", self.modelFileLabel)
 
-        # Latent Codes File
-        self.latentCodesFileButton = qt.QPushButton("Select Latent Codes File...")
-        self.latentCodesFileButton.connect("clicked(bool)", self.onSelectLatentCodesFile)
-        self.latentCodesFileLabel = qt.QLabel("No file selected")
+        self.latentCodesFileLabel = qt.QLabel("Not set")
         self.latentCodesFileLabel.setWordWrap(True)
-        inputLayout.addRow("Latent Codes File:", self.latentCodesFileButton)
-        inputLayout.addRow("", self.latentCodesFileLabel)
+        inputLayout.addRow("Latent Codes File:", self.latentCodesFileLabel)
 
-        # Input Mesh File
+        self.outputFolderLabel = qt.QLabel("Not set")
+        self.outputFolderLabel.setWordWrap(True)
+        inputLayout.addRow("Output Folder:", self.outputFolderLabel)
+
+        # Input Mesh File 
         self.inputFileButton = qt.QPushButton("Select Input Mesh...")
         self.inputFileButton.connect("clicked(bool)", self.onSelectInputFile)
         self.inputFileLabel = qt.QLabel("No file selected")
         self.inputFileLabel.setWordWrap(True)
         inputLayout.addRow("Input Mesh:", self.inputFileButton)
         inputLayout.addRow("", self.inputFileLabel)
-
-        # Output Folder
-        self.outputFolderButton = qt.QPushButton("Select Output Folder...")
-        self.outputFolderButton.connect("clicked(bool)", self.onSelectOutputFolder)
-        self.outputFolderLabel = qt.QLabel("No folder selected")
-        self.outputFolderLabel.setWordWrap(True)
-        inputLayout.addRow("Output Folder:", self.outputFolderButton)
-        inputLayout.addRow("", self.outputFolderLabel)
 
         # Optimization Settings Collapsible Layout
         optimCollapsible = ctk.ctkCollapsibleButton()
@@ -225,13 +224,6 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
 
         self.layout.addStretch(1)
 
-        # Internal state — pre-fill with defaults if they exist on disk
-        self.configFilePath = defaultConfig if os.path.isfile(defaultConfig) else None
-        self.modelFilePath = defaultModel if os.path.isfile(defaultModel) else None
-        self.latentCodesFilePath = defaultLatents if os.path.isfile(defaultLatents) else None
-        self.inputFilePath = None
-        self.outputFolderPath = defaultOutput if os.path.isdir(defaultOutput) else None
-
         # Update labels to reflect pre-filled defaults
         if self.configFilePath:
             self.configFileLabel.setText(self.configFilePath)
@@ -241,6 +233,7 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
             self.latentCodesFileLabel.setText(self.latentCodesFilePath)
         if self.outputFolderPath:
             self.outputFolderLabel.setText(self.outputFolderPath)
+
         self.updateRunButton()
 
     # Toggle Uncertainty Inputs
@@ -266,46 +259,118 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
             self.configFileLabel.setText(path)
             self.updateRunButton()
 
-    def onSelectModelFile(self):
-        path = qt.QFileDialog.getOpenFileName(
-            None, "Select Model File", "", "Model Files (*.pth)"
-        )
-        if path:
-            self.modelFilePath = path
-            self.modelFileLabel.setText(path)
-            self.updateRunButton()
-    
-    def onSelectLatentCodesFile(self):
-        path = qt.QFileDialog.getOpenFileName(
-            None, "Select Latent Codes File", "", "Latent Codes Files (*.pth)"
-        )
-        if path:
-            self.latentCodesFilePath = path
-            self.latentCodesFileLabel.setText(path)
-            self.updateRunButton()
+    # Auto populate filepaths from model root and validate
+    def validateModelRoot(self, rootDir):
+        checks = []
 
+        def check(label, path, isDir=False):
+            ok = os.path.isdir(path) if isDir else os.path.isfile(path)
+            checks.append((label, ok, path))
+            return ok
+
+        check("model_params_config.json", os.path.join(rootDir, "model_params_config.json"))
+        check("model/ folder", os.path.join(rootDir, "model"), isDir=True)
+        check("latent_codes/ folder", os.path.join(rootDir, "latent_codes"), isDir=True)
+        # Optional output folder (not required)
+        check("shape_completion/ (optional)", os.path.join(rootDir, "shape_completion"), isDir=True)
+        return checks
+
+    # Print validated filepath checklist in UI
+    def updateChecklistUI(self, rootDir):
+        checks = self.validateModelRoot(rootDir)
+        lines = []
+        allRequiredOk = True
+
+        for label, ok, path in checks:
+            icon = "✔" if ok else "✖"
+            lines.append(f"{icon} {label}")
+            if not ok and "optional" not in label:
+                allRequiredOk = False
+
+        self.modelChecklist.setPlainText("\n".join(lines))
+        return allRequiredOk
+
+    # From specified model root, resolve other default paths
+    def resolveModelRoot(self, rootDir):
+        config = os.path.join(rootDir, "model_params_config.json")
+        modelDir = os.path.join(rootDir, "model")
+        latentDir = os.path.join(rootDir, "latent_codes")
+        outputDir = os.path.join(rootDir, "shape_completion")
+
+        # Validate required structure
+        missing = []
+        if not os.path.isfile(config):
+            missing.append("model_params_config.json")
+        if not os.path.isdir(modelDir):
+            missing.append("model/")
+        if not os.path.isdir(latentDir):
+            missing.append("latent_codes/")
+
+        if missing:
+            raise ValueError(f"Invalid model package. Missing: {missing}")
+
+        # Try to auto-detect files inside folders
+        modelFiles = sorted([f for f in os.listdir(modelDir) if f.endswith(".pth")])
+        latentFiles = sorted([f for f in os.listdir(latentDir) if f.endswith(".pth")])
+
+        if not modelFiles:
+            raise ValueError("No .pth file found in model/")
+        if not latentFiles:
+            raise ValueError("No .pth file found in latent_codes/")
+
+        modelPath = os.path.join(modelDir, modelFiles[-1])
+        latentPath = os.path.join(latentDir, latentFiles[-1])
+
+        return config, modelPath, latentPath, outputDir
+
+    # Select model root dir
+    def onSelectModelRoot(self):
+        path = qt.QFileDialog.getExistingDirectory(None, "Select Model Root Folder")
+        if not path:
+            return
+
+        # Reset paths to avoid stale paths causing problems
+        self.configFilePath = None
+        self.modelFilePath = None
+        self.latentCodesFilePath = None
+        self.outputFolderPath = None
+
+        self.modelRootPath = path
+        self.modelRootLabel.setText(path)
+
+        ok = self.updateChecklistUI(path)
+        if not ok:
+            self.onLogMessage("Model root is incomplete. Fix missing files before running.")
+            self.runButton.setEnabled(False)
+            return
+
+        config, model, latents, output = self.resolveModelRoot(path)
+
+        self.configFilePath = config
+        self.modelFilePath = model
+        self.latentCodesFilePath = latents
+        self.outputFolderPath = output
+
+        self.configFileLabel.setText(config)
+        self.modelFileLabel.setText(model)
+        self.latentCodesFileLabel.setText(latents)
+        self.outputFolderLabel.setText(output)
+
+        self.updateRunButton()
+
+    # Input mesh selector
     def onSelectInputFile(self):
         path = qt.QFileDialog.getOpenFileName(
-            None, "Select Input Mesh", "", "Mesh Files (*.ply *.vtk)"
+            None, "Select Input Mesh", "", "Mesh Files (*.vtk *.vtp *.stl *.obj *.ply)"
         )
-        if path:
-            self.inputFilePath = path
-            self.inputFileLabel.setText(path)
-            self.onLogMessage("Loading mesh into scene...")
-            modelNode = slicer.util.loadModel(self.inputFilePath)
-            modelNode.SetName("Input Mesh")
-            slicer.app.layoutManager().threeDWidget(0).threeDView().resetFocalPoint()
-            self.updateRunButton()
-
-    def onSelectOutputFolder(self):
-        path = qt.QFileDialog.getExistingDirectory(None, "Select Output Folder")
-        if path:
-            self.outputFolderPath = path
-            self.outputFolderLabel.setText(path)
-            self.updateRunButton()
+        if not path:
+            return
+        self.inputFilePath = path
+        self.inputFileLabel.setText(path)
+        self.updateRunButton()
 
     def updateRunButton(self):
-        ready = all([self.configFilePath, self.modelFilePath, self.latentCodesFilePath, self.inputFilePath, self.outputFolderPath])
+        ready = bool(self.modelRootPath and self.inputFilePath)
         self.runButton.setEnabled(ready)
 
     # Inference
@@ -315,7 +380,7 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
         self.onLogMessage("Starting inference...")
 
         base = os.path.splitext(os.path.basename(self.inputFilePath))[0]
-        self._resultPath = self.outputFolderPath + '/' + base + ".done"
+        self._resultPath = os.path.join(self.outputFolderPath, base + ".done")
         self.onLogMessage("Result path: " + self._resultPath)
 
         # Path to the worker script (lives next to this module)
@@ -513,11 +578,12 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
             else:
                 self.onLogMessage(f"Inference failed (exit code {retcode}, file exists: {os.path.exists(self._resultPath)} at {self._resultPath})")
 
+
     def onLogMessage(self, message):
-        self.statusLog.appendPlainText(message)
+        self.statusLog.appendPlainText(str(message))
 
 
-class ShapeCompletionLogic(ScriptedLoadableModuleLogic):    
+class ShapeCompletionLogic(ScriptedLoadableModuleLogic):
 
     @staticmethod
     def installDependenciesIfNeeded():
@@ -536,38 +602,47 @@ class ShapeCompletionLogic(ScriptedLoadableModuleLogic):
             except ImportError:
                 slicer.util.pip_install('open3d')
                 import open3d as o3d  # Try again after installing
+
         try:
             import cv2
         except ImportError:
             slicer.util.pip_install('opencv-python')
+
         try:
             import nibabel
         except ImportError:
             slicer.util.pip_install('nibabel')
+
         try:
             import pymskt
         except ImportError:
             slicer.util.pip_install('mskt')
+
         try:
             import pyvista
         except ImportError:
             slicer.util.pip_install('pyvista')
+
         try:
             import pymeshfix
         except ImportError:
             slicer.util.pip_install('pymeshfix')
+
         try:
             import skimage
         except ImportError:
             slicer.util.pip_install('scikit-image')
+
         try:
             import sklearn
         except ImportError:
             slicer.util.pip_install('scikit-learn')
+
         try:
             import torch
         except ImportError:
             slicer.util.pip_install('torch')
+
         try:
             import vtk
         except ImportError:
