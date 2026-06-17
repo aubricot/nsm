@@ -22,6 +22,14 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
 
         ShapeCompletionLogic.installDependenciesIfNeeded()
 
+        # Compute default paths relative to the project root (run_v44)
+        projectRoot = os.path.dirname(os.path.dirname(__file__))
+        defaultRunDir = os.path.join(projectRoot, "run_v44")
+        defaultConfig = os.path.join(defaultRunDir, "model_params_config.json")
+        defaultModel = os.path.join(defaultRunDir, "model", "3000.pth")
+        defaultLatents = os.path.join(defaultRunDir, "latent_codes", "3000.pth")
+        defaultOutput = os.path.join(defaultRunDir, "shape_completion", "predictions")
+
         # Form Layout
         inputCollapsible = ctk.ctkCollapsibleButton()
         inputCollapsible.text = "Inputs"
@@ -67,6 +75,87 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
         self.outputFolderLabel.setWordWrap(True)
         inputLayout.addRow("Output Folder:", self.outputFolderButton)
         inputLayout.addRow("", self.outputFolderLabel)
+
+        # Optimization Settings Collapsible Layout
+        optimCollapsible = ctk.ctkCollapsibleButton()
+        optimCollapsible.text = "Optimization Settings"
+        optimCollapsible.collapsed = True
+        self.layout.addWidget(optimCollapsible)
+        optimLayout = qt.QFormLayout(optimCollapsible)
+
+        # Sample Points
+        self.nSamplesOptInput = qt.QLineEdit("240")
+        optimLayout.addRow("Sample Points:", self.nSamplesOptInput)
+
+        # Phase 1
+        self.phase1ItersInput = qt.QLineEdit("3000")
+        optimLayout.addRow("Phase 1 Iterations:", self.phase1ItersInput)
+
+        self.phase1LrInput = qt.QLineEdit("1e-4")
+        optimLayout.addRow("Phase 1 Learning Rate:", self.phase1LrInput)
+
+        self.phase1LambdaInput = qt.QLineEdit("1e-3")
+        optimLayout.addRow("Phase 1 Lambda Reg:", self.phase1LambdaInput)
+
+        # Phase 2
+        self.phase2ItersInput = qt.QLineEdit("8000")
+        optimLayout.addRow("Phase 2 Iterations:", self.phase2ItersInput)
+
+        self.phase2LrInput = qt.QLineEdit("1e-5")
+        optimLayout.addRow("Phase 2 Learning Rate:", self.phase2LrInput)
+
+        self.phase2LambdaInput = qt.QLineEdit("1e-5")
+        optimLayout.addRow("Phase 2 Lambda Reg:", self.phase2LambdaInput)
+
+        # Resolution
+        self.nPtsPerAxisInput = qt.QLineEdit("256")
+        optimLayout.addRow("Resolution (pts/axis):", self.nPtsPerAxisInput)
+
+        # Uncertainty Collapsible Layout
+        uncertaintyCollapsible = ctk.ctkCollapsibleButton()
+        uncertaintyCollapsible.text = "Uncertainty Settings"
+        uncertaintyCollapsible.collapsed = True
+        self.layout.addWidget(uncertaintyCollapsible)
+        uncertaintyLayout = qt.QFormLayout(uncertaintyCollapsible)
+
+        # Checkbox to enable uncertainty
+        self.estimateUncertaintyCheckbox = qt.QCheckBox("Estimate Uncertainty")
+        self.estimateUncertaintyCheckbox.setChecked(False)
+        uncertaintyLayout.addRow("", self.estimateUncertaintyCheckbox)
+
+        # Propagation Mode
+        self.propagationModeCombobox = qt.QComboBox()
+        self.propagationModeCombobox.addItems(["analytical", "montecarlo"])
+        uncertaintyLayout.addRow("Propagation Mode:", self.propagationModeCombobox)
+
+        # Data Std
+        self.dataStdInput = qt.QLineEdit("2e-5")
+        uncertaintyLayout.addRow("Data Std (sigma_Y):", self.dataStdInput)
+
+        # Latent Std
+        self.latentStdInput = qt.QLineEdit("5e-4")
+        uncertaintyLayout.addRow("Latent Std (sigma_z):", self.latentStdInput)
+
+        # Data Weight
+        self.dataWeightInput = qt.QLineEdit("1.0")
+        uncertaintyLayout.addRow("Data Weight:", self.dataWeightInput)
+
+        # Latent Weight
+        self.latentWeightInput = qt.QLineEdit("1.0")
+        uncertaintyLayout.addRow("Latent Weight:", self.latentWeightInput)
+
+        # Decimate Triangles
+        self.nTrianglesInput = qt.QLineEdit("5000")
+        uncertaintyLayout.addRow("Decimate Triangles:", self.nTrianglesInput)
+
+        # Monte Carlo Samples
+        self.nSamplesInput = qt.QLineEdit("2000")
+        uncertaintyLayout.addRow("Monte Carlo Samples:", self.nSamplesInput)
+
+        # Connect signals
+        self.estimateUncertaintyCheckbox.connect("stateChanged(int)", self.onToggleUncertaintyOptions)
+        self.propagationModeCombobox.connect("currentIndexChanged(int)", self.onToggleUncertaintyOptions)
+        self.onToggleUncertaintyOptions()
 
         # Run Button
         self.runButton = qt.QPushButton("Run Inference")
@@ -136,12 +225,36 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
 
         self.layout.addStretch(1)
 
-        # Internal state
-        self.configFilePath = None
-        self.modelFilePath = None
-        self.latentCodesFilePath = None
+        # Internal state — pre-fill with defaults if they exist on disk
+        self.configFilePath = defaultConfig if os.path.isfile(defaultConfig) else None
+        self.modelFilePath = defaultModel if os.path.isfile(defaultModel) else None
+        self.latentCodesFilePath = defaultLatents if os.path.isfile(defaultLatents) else None
         self.inputFilePath = None
-        self.outputFolderPath = None
+        self.outputFolderPath = defaultOutput if os.path.isdir(defaultOutput) else None
+
+        # Update labels to reflect pre-filled defaults
+        if self.configFilePath:
+            self.configFileLabel.setText(self.configFilePath)
+        if self.modelFilePath:
+            self.modelFileLabel.setText(self.modelFilePath)
+        if self.latentCodesFilePath:
+            self.latentCodesFileLabel.setText(self.latentCodesFilePath)
+        if self.outputFolderPath:
+            self.outputFolderLabel.setText(self.outputFolderPath)
+        self.updateRunButton()
+
+    # Toggle Uncertainty Inputs
+    def onToggleUncertaintyOptions(self, state=None):
+        enabled = self.estimateUncertaintyCheckbox.isChecked()
+        self.propagationModeCombobox.setEnabled(enabled)
+        self.dataStdInput.setEnabled(enabled)
+        self.latentStdInput.setEnabled(enabled)
+        self.dataWeightInput.setEnabled(enabled)
+        self.latentWeightInput.setEnabled(enabled)
+        self.nTrianglesInput.setEnabled(enabled)
+        
+        is_mc = self.propagationModeCombobox.currentText == "montecarlo"
+        self.nSamplesInput.setEnabled(enabled and is_mc)
 
     # File/Folder Selection
     def onSelectConfigFile(self):
@@ -217,11 +330,35 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
         self._logFile = open(self._logFilePath, "w")
         self._logReadPos = 0
 
+        cmd = [
+            pythonExe, workerScript,
+            "--config", self.configFilePath,
+            "--model", self.modelFilePath,
+            "--latent_codes", self.latentCodesFilePath,
+            "--input_mesh", self.inputFilePath,
+            "--output_folder", self.outputFolderPath,
+            # Optimization settings
+            "--n_samples", self.nSamplesOptInput.text,
+            "--phase1_iters", self.phase1ItersInput.text,
+            "--phase1_lr", self.phase1LrInput.text,
+            "--phase1_lambda_reg", self.phase1LambdaInput.text,
+            "--phase2_iters", self.phase2ItersInput.text,
+            "--phase2_lr", self.phase2LrInput.text,
+            "--phase2_lambda_reg", self.phase2LambdaInput.text,
+            "--n_pts_per_axis", self.nPtsPerAxisInput.text,
+        ]
+        if self.estimateUncertaintyCheckbox.isChecked():
+            cmd.append("--estimate_uncertainty")
+            cmd.extend(["--propagation_mode", self.propagationModeCombobox.currentText])
+            cmd.extend(["--data_std", self.dataStdInput.text])
+            cmd.extend(["--latent_prior_std", self.latentStdInput.text])
+            cmd.extend(["--data_weight", self.dataWeightInput.text])
+            cmd.extend(["--latent_weight", self.latentWeightInput.text])
+            cmd.extend(["--n_triangles", self.nTrianglesInput.text])
+            cmd.extend(["--mc_samples", self.nSamplesInput.text])
+
         self._process = subprocess.Popen(
-            [pythonExe, workerScript,
-            self.configFilePath, self.modelFilePath,
-            self.latentCodesFilePath, self.inputFilePath,
-            self.outputFolderPath],
+            cmd,
             stdout=self._logFile,
             stderr=subprocess.STDOUT,
         )
@@ -252,6 +389,93 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
         self.precisionValue.setText(f"{precision:.6f}")
         self.recallValue.setText(f"{recall:.6f}")
 
+    def applyUncertaintyVisualization(self, modelNode):
+        import vtk
+
+        polyData = modelNode.GetPolyData()
+        if not polyData:
+            self.onLogMessage("No polydata found on output model.")
+            return
+
+        pointData = polyData.GetPointData()
+        if not pointData:
+            self.onLogMessage("No point data found on output model.")
+            return
+
+        # Prefer micro-unit scalar for readable legend.
+        scalarName = "SdfUncertainty_um"
+        scalarArray = pointData.GetArray(scalarName)
+
+        # Fallback to raw scalar if old output files do not contain the _um field.
+        if scalarArray is None:
+            scalarName = "SdfUncertainty"
+            scalarArray = pointData.GetArray(scalarName)
+
+        if scalarArray is None:
+            self.onLogMessage("No SdfUncertainty scalar field found.")
+            return
+
+        self.onLogMessage(f"Applying uncertainty visualization using {scalarName}.")
+
+        displayNode = modelNode.GetDisplayNode()
+        if not displayNode:
+            modelNode.CreateDefaultDisplayNodes()
+            displayNode = modelNode.GetDisplayNode()
+
+        if not displayNode:
+            self.onLogMessage("Could not create display node.")
+            return
+
+        # Activate point scalar data
+        try:
+            if hasattr(displayNode, "SetActiveAttributeLocation"):
+                displayNode.SetActiveAttributeLocation(vtk.vtkAssignAttribute.POINT_DATA)
+        except Exception as e:
+            self.onLogMessage(f"Could not set active attribute location: {str(e)}")
+
+        displayNode.SetActiveScalarName(scalarName)
+        displayNode.SetScalarVisibility(True)
+
+        # Use manual scalar range so colorbar is stable and meaningful
+        scalarRange = scalarArray.GetRange()
+
+        # Optional: for cleaner visualization, use percentiles instead of full min/max.
+        # For exact notebook-like auto range, keep scalarRange as above.
+        displayNode.SetScalarRangeFlag(slicer.vtkMRMLDisplayNode.UseManualScalarRange)
+        displayNode.SetScalarRange(scalarRange[0], scalarRange[1])
+
+        # Try to find Viridis robustly
+        colorNode = None
+        for node in slicer.util.getNodesByClass("vtkMRMLColorNode"):
+            if "viridis" in node.GetName().lower():
+                colorNode = node
+                break
+
+        if colorNode:
+            displayNode.SetAndObserveColorNodeID(colorNode.GetID())
+        else:
+            self.onLogMessage("Viridis color map not found. Using default scalar color map.")
+
+        displayNode.SetOpacity(1.0)
+        displayNode.Modified()
+
+        # Add color legend / colorbar
+        try:
+            colorLegendDisplayNode = slicer.modules.colors.logic().AddDefaultColorLegendDisplayNode(modelNode)
+            if colorLegendDisplayNode:
+                colorLegendDisplayNode.SetVisibility(True)
+
+                if scalarName == "SdfUncertainty_um":
+                    colorLegendDisplayNode.SetTitleText("SDF uncertainty (µ)")
+                    colorLegendDisplayNode.SetLabelFormat("%.1f")
+                else:
+                    colorLegendDisplayNode.SetTitleText("SDF uncertainty")
+                    colorLegendDisplayNode.SetLabelFormat("%.2e")
+
+                colorLegendDisplayNode.Modified()
+        except Exception as e:
+            self.onLogMessage(f"Could not show color legend: {str(e)}")
+
     def _pollSubprocess(self):
         # Read any new lines from the log file (never blocks)
         try:
@@ -280,6 +504,10 @@ class ShapeCompletionWidget(ScriptedLoadableModuleWidget):
                 self.onLogMessage(f"Inference complete: {self.outputPath}")
                 outputNode = slicer.util.loadModel(self.outputPath)
                 outputNode.SetName("Predicted Mesh")
+
+                # Configure visualization if uncertainty scalars are present
+                self.applyUncertaintyVisualization(outputNode)
+
                 slicer.app.layoutManager().threeDWidget(0).threeDView().resetFocalPoint()
                 self.calculateDistsButton.setEnabled(True)
             else:
@@ -325,6 +553,10 @@ class ShapeCompletionLogic(ScriptedLoadableModuleLogic):
         except ImportError:
             slicer.util.pip_install('pyvista')
         try:
+            import pymeshfix
+        except ImportError:
+            slicer.util.pip_install('pymeshfix')
+        try:
             import skimage
         except ImportError:
             slicer.util.pip_install('scikit-image')
@@ -336,3 +568,7 @@ class ShapeCompletionLogic(ScriptedLoadableModuleLogic):
             import torch
         except ImportError:
             slicer.util.pip_install('torch')
+        try:
+            import vtk
+        except ImportError:
+            slicer.util.pip_install('vtk')
