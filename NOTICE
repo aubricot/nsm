@@ -1,0 +1,12 @@
+This project is a fork of:
+
+Neural Shape Model (NSM)
+https://github.com/gattia/NSM
+
+Original software is licensed under the NSM License, which incorporates
+GNU AGPL v3.0 with additional commercial use restrictions.
+
+This fork contains modifications by:
+- 3D-fossils-Haag (https://github.com/3D-fossils-Haag/nsm)
+
+All modifications are subject to the same NSM License terms.
