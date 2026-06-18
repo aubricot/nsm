@@ -15,15 +15,34 @@ ARGUMENTS:
         Checkpoint epoch to load (example: 3000). If omitted, the script
         automatically picks the highest numeric checkpoint in run_name/model/.
 
-    --mesh_split {train,val,test}
-        Which split from model_params_config.json to classify. Default: test
+    --mesh_source {train,val,test,random,single,shape_completion}
+        Which meshes to classify.
+        train/val/test: all meshes from the corresponding split in model_params_config.json.
+        random: N random meshes drawn from --mesh_split (requires --n_meshes).
+        single: one specific mesh via --mesh_file.
+        shape_completion: VTK files found under --shape_completion_dir, optionally
+        filtered to a single mesh subdirectory via --mesh_file. 
+        Default: random
+
+    --n_meshes INT
+        Number of meshes to sample. Used with --mesh_source random or
+        shape_completion when you want to subsample results. 
+        Default: 5
+
+    --mesh_file TEXT
+        Filename of a specific mesh. Used with --mesh_source single to select
+        one mesh, or with --mesh_source shape_completion to target that mesh's
+        prediction subdirectory. 
+        Default: None
 
     --suffix TEXT
-        Suffix used in output file/folder names. Default: timestamp
+        Suffix used in output file/folder names. 
+        Default: timestamp
 
     --save_vtk {true,false}
         Whether to reconstruct and save decoded VTK meshes for each classified
-        sample. Default: false
+        sample. 
+        Default: false
 
     --classification_mode {baseline,hierarchy}
         baseline: uses NSM helper label parsing and distance retrieval only.
@@ -33,7 +52,8 @@ ARGUMENTS:
     --position_mode {categorical,normalized}
         categorical: uses region/label matching only.
         normalized: computes continuous normalized position error using
-        vertebrae_counts.csv via SpinePositionMapper. Default: normalized
+        vtk_name_to_mapping_v2.csv via vtk_parsing_logic. 
+        Default: normalized
 
     --enable_classifiers
         If set (and classification_mode=hierarchy), trains supervised
@@ -45,15 +65,18 @@ ARGUMENTS:
         none: PCA initialization from mean latent and top PCs.
         family/genus/species: initialize from precomputed group-average latents
         in run_name/latent_codes_average/<level>/mean_latents_by_<level>.npz.
-        Falls back to PCA if no match/file is found. Default: none
+        Falls back to PCA if no match/file is found. 
+        Default: none
 
     --latent_noise_std FLOAT
         Standard deviation of Gaussian noise added to the initial latent code
-        before optimization. Default: 0.0
+        before optimization. 
+        Default: 0.0
 
     --sample_noise_std FLOAT
         Standard deviation of Gaussian noise added to sampled xyz points before
-        latent optimization. Default: 0.0
+        latent optimization. 
+        Default: 0.0
 
 EXAMPLES:
     python classify_vertebrae.py --run_name run_v57a
@@ -65,6 +88,7 @@ import argparse
 import os
 from datetime import datetime
 from typing import Dict, Optional, Tuple
+import random as _random
 
 import numpy as np
 import pandas as pd
@@ -77,12 +101,12 @@ from NSM.helper_funcs import (
     load_config,
     load_model_and_latents,
     parse_labels_from_filepaths,
+    find_shape_completion_files
 )
 from NSM.mesh import create_mesh, get_sdfs
 from NSM.optimization import get_top_k_pcs, pca_initialize_latent
 
 from hierarchy.classifiers import predict_classifiers, train_classifiers
-from hierarchy.spine_position import SpinePositionMapper
 from hierarchy.taxonomy import parse_taxonomy_from_filename
 
 def _latest_checkpoint(run_dir: str) -> str:
@@ -102,8 +126,18 @@ def _latest_checkpoint(run_dir: str) -> str:
 def _parse_args():
     parser = argparse.ArgumentParser(description="Unified NSM vertebrae classification")
     parser.add_argument("--run_name", type=str, default="run_v57a")
+    parser.add_argument("--mesh_source", choices=["random", "single", "test", "train", "val", "shape_completion"],
+                        default="random", help=("random: N random meshes from --test."
+                                               "single: one mesh via --mesh_file."
+                                               "test: test paths from config"
+                                               "train: train paths from config"
+                                               "val: val paths from config "
+                                               "shape_completion: VTKs found under --shape_completion_dir."),)
+    parser.add_argument("--n_meshes", type=int, default=5, help="Used with --mesh_source random.")
+    parser.add_argument("--mesh_file", type=str, default=None, help="Used with --mesh_source single.")
+    parser.add_argument("--shape_completion_dir", type=str, default="shape_completion/predictions/",
+                        help="Root dir for shape completion results. Used with --mesh_source shape_completion.",)
     parser.add_argument("--checkpoint", type=str, default=None, help="If omitted, uses latest.")
-    parser.add_argument("--mesh_split", choices=["train", "val", "test"], default="test")
     parser.add_argument("--suffix", type=str, default=datetime.now().strftime("%Y-%m-%d_%H%M%S"))
     parser.add_argument("--save_vtk", type=lambda x: x.lower() != "false", default=False)
 
@@ -207,6 +241,34 @@ def _extract_hierarchy_labels(fname: str):
         return None, None, None
     return parsed.get("species"), parsed.get("genus"), parsed.get("position")
 
+def _resolve_mesh_paths(args, config: dict) -> list[str]:
+    split_map = {"train": "list_mesh_paths", "val":   "val_paths", "test":  "test_paths",}
+
+    if args.mesh_source in split_map:
+        return config[split_map[args.mesh_source]]
+
+    if args.mesh_source == "random":
+        split_paths = config.get("test_paths", config["list_mesh_paths"])
+        return _random.sample(split_paths, min(args.n_meshes, len(split_paths)))
+
+    if args.mesh_source == "single":
+        if not args.mesh_file:
+            raise ValueError("--mesh_source single requires --mesh_file")
+        all_paths = sum(config[k] for k in split_map.values() if k in config)
+        match = next((p for p in all_paths if os.path.basename(p) == args.mesh_file), None)
+        return [match if match else args.mesh_file]
+
+    if args.mesh_source == "shape_completion":
+        target_dir = args.shape_completion_dir
+        if args.mesh_file:
+            target_dir = os.path.join(target_dir, os.path.splitext(args.mesh_file)[0])
+        paths = find_shape_completion_files(target_dir)
+        if args.n_meshes and len(paths) > args.n_meshes:
+            paths = _random.sample(paths, args.n_meshes)
+        return paths
+
+    raise ValueError(f"Unknown mesh_source: {args.mesh_source}")
+
 
 def main():
     args = _parse_args()
@@ -222,15 +284,19 @@ def main():
     mean_latent = latent_codes.mean(dim=0, keepdim=True)
     _, top_k_reg = get_top_k_pcs(latent_codes, threshold=0.95)
 
-    mesh_paths = config[f"{args.mesh_split}_paths"] if args.mesh_split != "train" else config["list_mesh_paths"]
     train_paths = config["list_mesh_paths"]
     train_files = [os.path.basename(p) for p in train_paths]
+    mesh_paths = _resolve_mesh_paths(args, config)
 
     position_mapper = None
+    norm_pos_map = {}
     if args.position_mode == "normalized":
-        counts_csv = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vertebrae_counts.csv")
+        counts_csv = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vtk_name_to_mapping_v2.csv")
         if os.path.exists(counts_csv):
-            position_mapper = SpinePositionMapper(counts_csv)
+            norm_pos_df = pd.read_csv(counts_csv)
+            norm_pos_map = dict(zip(norm_pos_df["vtk_name"], norm_pos_df["normalized_position"]))
+            # Compute average step size (1 vertebra worth of normalized position)
+            avg_vertebra_step = (1.0 / norm_pos_df["Total Vert"]).mean()
 
     taxonomic_latents = _load_taxonomic_latents(run_dir, args.init)
 
@@ -309,18 +375,48 @@ def main():
             row["gt_genus"] = gt_genus
             row["pred_genus"] = pred_genus
 
-        if args.position_mode == "normalized" and position_mapper is not None:
-            gt_norm = position_mapper.get_normalized_position(mesh_name)
-            pred_norm = position_mapper.get_normalized_position(top_names[0])
+        if args.position_mode == "normalized" and norm_pos_map:
+            gt_norm = norm_pos_map.get(mesh_name)
+            pred_norm = norm_pos_map.get(top_names[0])
+            same_region = (gt_pos and pred_pos and gt_pos[0].lower() == pred_pos[0].lower())
             row["gt_norm_position"] = gt_norm
             row["pred_norm_position"] = pred_norm
-            row["top1_norm_abs_error"] = (
-                abs(gt_norm - pred_norm) if gt_norm is not None and pred_norm is not None else None
-            )
+            if same_region and gt_norm is not None and pred_norm is not None:
+                abs_err = abs(gt_norm - pred_norm)
+                row["top1_norm_abs_error"] = abs_err
+                row["top1_position_match"] = "yes" if abs_err <= avg_vertebra_step else "no"
+            else:
+                row["top1_norm_abs_error"] = "NA_region_mismatch"
+                row["top1_position_match"] = "no"
 
         for rank, (name, dist) in enumerate(zip(top_names, top5_dist), start=1):
             row[f"top{rank}_name"] = name
             row[f"top{rank}_distance"] = float(dist)
+
+            if args.classification_mode == "hierarchy":
+                r_species, r_genus, r_pos = _extract_hierarchy_labels(name)
+                row[f"top{rank}_genus"] = r_genus
+            else:
+                pair, _ = parse_labels_from_filepaths([name])
+                r_species, r_pos = pair[0]
+                r_genus = None
+
+            row[f"top{rank}_species"] = r_species
+            row[f"top{rank}_position"] = r_pos
+            row[f"top{rank}_species_match"] = "yes" if gt_species and gt_species == r_species else "no"
+
+            if args.position_mode == "normalized" and norm_pos_map:
+                r_norm = norm_pos_map.get(name)
+                same_region = gt_pos and r_pos and gt_pos[0].lower() == r_pos[0].lower()
+                if same_region and gt_norm is not None and r_norm is not None:
+                    abs_err = abs(gt_norm - r_norm)
+                    row[f"top{rank}_norm_abs_error"] = abs_err
+                    row[f"top{rank}_position_match"] = "yes" if abs_err <= avg_vertebra_step else "no"
+                else:
+                    row[f"top{rank}_norm_abs_error"] = "NA_region_mismatch"
+                    row[f"top{rank}_position_match"] = "no"
+            else:
+                row[f"top{rank}_position_match"] = "yes" if gt_pos and r_pos and gt_pos == r_pos else "no"
 
         if clf_models is not None:
             preds, _, _ = predict_classifiers(clf_models, latent_novel.detach().cpu().numpy())
