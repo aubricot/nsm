@@ -28,6 +28,7 @@ pip install -e .
 To run the tests, execute the following command in your terminal:
 ```
 <path to your slicer install>/bin/PythonSlicer -m unittest test_shape_completion.py
+<path to your slicer install>/bin/PythonSlicer -m unittest test_classification.py
 ```
 NOTE: Make sure to replace `<path to your slicer install>` with the actual path of your 3D Slicer installation.
 
