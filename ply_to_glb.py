@@ -1,3 +1,6 @@
+# First run this to convert plys to glbs
+# Then run compress_draco.sh to convert glbs to draco glbs
+
 import os
 import open3d as o3d
 
