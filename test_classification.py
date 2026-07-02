@@ -34,6 +34,7 @@ class TestClassification(unittest.TestCase):
             result=os.path.join(self.temp_dir, "top5.json"),
             iterations=1,
             learning_rate=1e-3,
+            seed=42,
         )
 
     @patch("NSM.optimization.optimize_latent")

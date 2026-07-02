@@ -4,6 +4,37 @@ import os
 import sys
 
 
+def set_reproducible_seed(seed=42):
+    import random
+    import numpy as np
+    import torch
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
+
+def patch_signed_distance_dtype():
+    import numpy as np
+    import pymskt.mesh.meshTools as meshTools
+
+    original = meshTools.pcu.signed_distance_to_mesh
+
+    def signed_distance_to_mesh_patch(pts, points, faces):
+        pts = np.asarray(pts, dtype=np.float64)
+        points = np.asarray(points, dtype=np.float64)
+        faces = np.asarray(faces, dtype=np.int32)
+        return original(pts, points, faces)
+
+    meshTools.pcu.signed_distance_to_mesh = signed_distance_to_mesh_patch
+
+
 def _prepare_mesh(mesh_path, output_dir):
     """Return a VTK mesh path; conversion products are kept with the results."""
     if not mesh_path.lower().endswith(".ply"):
@@ -35,11 +66,19 @@ def classify(args):
 
     meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
     meshes.Mesh.point_coords = property(fixed_point_coords)
+    patch_signed_distance_dtype()
 
     os.makedirs(args.output_dir, exist_ok=True)
     mesh_path = _prepare_mesh(args.input_mesh, args.output_dir)
     config = load_config(args.config)
+    set_reproducible_seed(args.seed)
+    print("Classification seed: {}".format(args.seed))
+    print("Classification mesh: {}".format(mesh_path))
+    print("Classification model: {}".format(args.model))
+    print("Classification latent codes: {}".format(args.latent_codes))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Classification device: {}".format(device))
+    print("Classification iterations: {}".format(args.iterations))
     model, _, latent_codes = load_model_and_latents(args.model, args.latent_codes, config, device)
     mean_latent = latent_codes.mean(dim=0, keepdim=True)
     _, top_k_reg = get_top_k_pcs(latent_codes, threshold=0.99)
@@ -54,8 +93,11 @@ def classify(args):
         norm_pts=config["normalize_pts"], scale_method=config["scale_method"],
         reference_mesh=None, verbose=config["verbose"], save_cache=config["cache"],
         equal_pos_neg=config["equal_pos_neg"], fix_mesh=config["fix_mesh"],
+        random_seed=args.seed,
     )
+    set_reproducible_seed(args.seed)
     sample, _ = dataset[0]
+    set_reproducible_seed(args.seed)
     latent = optimize_latent(
         model, sample["xyz"].to(device), sample["gt_sdf"].to(device),
         config["latent_size"], top_k_reg, mean_latent, latent_codes,
@@ -93,4 +135,5 @@ if __name__ == "__main__":
     parser.add_argument("--result", required=True)
     parser.add_argument("--iterations", type=int, default=1000)
     parser.add_argument("--learning_rate", type=float, default=1e-3)
+    parser.add_argument("--seed", type=int, default=42)
     classify(parser.parse_args())
