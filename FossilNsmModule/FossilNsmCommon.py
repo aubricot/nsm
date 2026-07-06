@@ -1,10 +1,20 @@
 import os
-
 import ctk
 import qt
 import slicer
-from slicer.ScriptedLoadableModule import ScriptedLoadableModuleLogic
+from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadableModuleLogic
 
+FOSSIL_NSM_MESH_LAYOUT_ID = 702
+FOSSIL_NSM_PLOT_LAYOUT_ID = 703
+
+class FossilNsmCommon(ScriptedLoadableModule):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent.title = "FossilNsmCommon"
+        self.parent.categories = ["FossilNSM"]
+        self.parent.contributors = ["Wolcott et al"]
+        self.parent.helpText = "Shared logic for FossilNSM modules."
+        self.parent.hidden = True 
 
 class FossilNsmCommonWidget:
     def initializeFossilNsmState(self):
@@ -137,7 +147,7 @@ class FossilNsmCommonWidget:
 
         ok = self.updateChecklistUI(path)
         if not ok:
-            self.onLogMessage("Model root is incomplete. Fix missing files before running.")
+            self.onLogMessage("Model root is incomplete. Fix missing files before running.", color="red")
             self.updateRunButton()
             return
 
@@ -175,8 +185,81 @@ class FossilNsmCommonWidget:
             and self.outputFolderPath
         )
 
-    def onLogMessage(self, message):
-        self.statusLog.appendPlainText(str(message))
+    def onLogMessage(self, message, color=None):
+        html_message = str(message).replace("\n", "<br>")
+        if color:
+            self.statusLog.append('<span style="color:{};">{}</span>'.format(color, html_message))
+        else:
+            self.statusLog.append(html_message)
+
+    def registerMeshLayout(self):
+        layoutDescription = """
+        <layout type="vertical" split="false">
+        <item>
+            <layout type="horizontal">
+            <item>
+                <view class="vtkMRMLViewNode" singletontag="FossilInput">
+                <property name="viewlabel" action="default">Input</property>
+                </view>
+            </item>
+            <item>
+                <view class="vtkMRMLViewNode" singletontag="Match1">
+                <property name="viewlabel" action="default">Match 1</property>
+                </view>
+            </item>
+            <item>
+                <view class="vtkMRMLViewNode" singletontag="Match2">
+                <property name="viewlabel" action="default">Match 2</property>
+                </view>
+            </item>
+            </layout>
+        </item>
+        <item>
+            <layout type="horizontal">
+            <item>
+                <view class="vtkMRMLViewNode" singletontag="Match3">
+                <property name="viewlabel" action="default">Match 3</property>
+                </view>
+            </item>
+            <item>
+                <view class="vtkMRMLViewNode" singletontag="Match4">
+                <property name="viewlabel" action="default">Match 4</property>
+                </view>
+            </item>
+            <item>
+                <view class="vtkMRMLViewNode" singletontag="Match5">
+                <property name="viewlabel" action="default">Match 5</property>
+                </view>
+            </item>
+            </layout>
+        </item>
+        </layout>
+        """
+        layoutNode = slicer.app.layoutManager().layoutLogic().GetLayoutNode()
+        if not layoutNode.IsLayoutDescription(FOSSIL_NSM_MESH_LAYOUT_ID):
+            layoutNode.AddLayoutDescription(FOSSIL_NSM_MESH_LAYOUT_ID, layoutDescription)
+
+    def registerPlotLayout(self):
+        layoutDescription = """
+        <layout type="horizontal" split="false">
+        <item>
+            <view class="vtkMRMLPlotViewNode" singletontag="PCAPlot">
+            <property name="viewlabel" action="default">PCA</property>
+            </view>
+        </item>
+        <item>
+            <view class="vtkMRMLPlotViewNode" singletontag="TSNEPlot">
+            <property name="viewlabel" action="default">t-SNE</property>
+            </view>
+        </item>
+        </layout>
+        """
+        layoutNode = slicer.app.layoutManager().layoutLogic().GetLayoutNode()
+        if not layoutNode.IsLayoutDescription(FOSSIL_NSM_PLOT_LAYOUT_ID):
+            layoutNode.AddLayoutDescription(FOSSIL_NSM_PLOT_LAYOUT_ID, layoutDescription)
+
+    def getViewNode(self, tag):
+        return slicer.mrmlScene.GetSingletonNode(tag, "vtkMRMLViewNode")
 
 
 class FossilNsmLogic(ScriptedLoadableModuleLogic):
