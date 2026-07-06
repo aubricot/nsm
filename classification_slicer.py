@@ -2,29 +2,46 @@ import argparse
 import json
 import os
 import sys
+import numpy as np
+import random
+
+import torch
+import pymskt.mesh.meshes as meshes
+from NSM.datasets import SDFSamples
+from NSM.helper_funcs import (
+        fixed_point_coords,
+        load_config,
+        load_model_and_latents,
+        safe_load_mesh_scalars,
+    )
+from NSM.optimization import get_top_k_pcs, optimize_latent
+
+import pymskt.mesh.meshTools as meshTools
+import pyvista as pv
+
+def set_reproducible_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
 
 
 def patch_signed_distance_dtype():
-    import numpy as np
-    import pymskt.mesh.meshTools as meshTools
-
     original = meshTools.pcu.signed_distance_to_mesh
-
     def signed_distance_to_mesh_patch(pts, points, faces):
         pts = np.asarray(pts, dtype=np.float64)
         points = np.asarray(points, dtype=np.float64)
         faces = np.asarray(faces, dtype=np.int32)
         return original(pts, points, faces)
-
     meshTools.pcu.signed_distance_to_mesh = signed_distance_to_mesh_patch
 
 
 def _prepare_mesh(mesh_path, output_dir):
-    """Return a VTK mesh path; conversion products are kept with the results."""
     if not mesh_path.lower().endswith(".ply"):
         return mesh_path
-    import pyvista as pv
-
     converted = os.path.join(
         output_dir, os.path.splitext(os.path.basename(mesh_path))[0] + ".vtk"
     )
@@ -36,25 +53,14 @@ def classify(args):
     repository_root = os.path.dirname(os.path.abspath(__file__))
     if repository_root not in sys.path:
         sys.path.insert(0, repository_root)
-
-    import torch
-    import pymskt.mesh.meshes as meshes
-    from NSM.datasets import SDFSamples
-    from NSM.helper_funcs import (
-        fixed_point_coords,
-        load_config,
-        load_model_and_latents,
-        safe_load_mesh_scalars,
-    )
-    from NSM.optimization import get_top_k_pcs, optimize_latent
-
     meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
     meshes.Mesh.point_coords = property(fixed_point_coords)
     patch_signed_distance_dtype()
-
     os.makedirs(args.output_dir, exist_ok=True)
     mesh_path = _prepare_mesh(args.input_mesh, args.output_dir)
     config = load_config(args.config)
+    set_reproducible_seed(args.seed)
+    print("Classification seed: {}".format(args.seed))
     print("Classification mesh: {}".format(mesh_path))
     print("Classification model: {}".format(args.model))
     print("Classification latent codes: {}".format(args.latent_codes))
@@ -75,8 +81,11 @@ def classify(args):
         norm_pts=config["normalize_pts"], scale_method=config["scale_method"],
         reference_mesh=None, verbose=config["verbose"], save_cache=config["cache"],
         equal_pos_neg=config["equal_pos_neg"], fix_mesh=config["fix_mesh"],
+        random_seed=args.seed,
     )
+    set_reproducible_seed(args.seed)
     sample, _ = dataset[0]
+    set_reproducible_seed(args.seed)
     latent = optimize_latent(
         model, sample["xyz"].to(device), sample["gt_sdf"].to(device),
         config["latent_size"], top_k_reg, mean_latent, latent_codes,
@@ -99,6 +108,10 @@ def classify(args):
             "cosine_distance": float(distances[index].detach().cpu()),
         })
 
+    np.save(os.path.join(args.output_dir, "all_latents.npy"), latent_codes.detach().cpu().numpy())
+    np.save(os.path.join(args.output_dir, "fossil_latent.npy"), latent.detach().cpu().numpy())
+    np.save(os.path.join(args.output_dir, "top5_indices.npy"), np.array(indices))
+
     with open(args.result, "w", encoding="utf-8") as stream:
         json.dump({"metric": "cosine distance", "matches": matches}, stream, indent=2)
     print("Classification results written to " + args.result)
@@ -114,4 +127,5 @@ if __name__ == "__main__":
     parser.add_argument("--result", required=True)
     parser.add_argument("--iterations", type=int, default=1000)
     parser.add_argument("--learning_rate", type=float, default=1e-3)
+    parser.add_argument("--seed", type=int, default=42)
     classify(parser.parse_args())
