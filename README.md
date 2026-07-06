@@ -32,6 +32,7 @@ To run the tests, execute the following command in your terminal:
 NOTE: Make sure to replace `<path to your slicer install>` with the actual path of your 3D Slicer installation.
 
 # Usage
+Please refer to the project [Wiki](https://github.com/3D-fossils-Haag/nsm/wiki) for detailed instructions on using NSM.
 
 ## Demos
 Check out our demos to build NSM fully in the Google Colab runtime environment and interactively evaluate our tools with demo data in under 10 minutes, no need to connect to your Google Drive!
