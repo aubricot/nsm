@@ -18,10 +18,24 @@ Use Fossil NSM Module in [3D Slicer](https://www.slicer.org/) to do shape comple
 7. Open 3D Slicer
 8. Build the Fossil NSM Module   
    Extension Wizard -> Select Extension -> path/to/your/nsm/FossilNsmModule
-9. Use Fossil NSM Module to do shape completion!
-   Modules -> Fossil NSM -> Shape Completion -> Select your input files and click "Run Inference"
+9. Use Fossil NSM Module for shape completion or classification!
+   Modules -> FossilNSM -> Shape Completion -> Select your input files and click "Run Inference"
+   Modules -> FossilNSM -> Classification -> Select your input files and click "Classify Input Mesh"
 
-   
+# Classification and reference-mesh packages
+
+The Classification module classifies an input mesh by optimizing its latent code
+and ranking the five nearest training codes by cosine distance. Select the same
+model root used for completion, select an input mesh, then click
+**Classify Input Mesh**. The result table is saved as a small JSON file in
+`<model root>/shape_completion/classification/` and can be retained without
+copying the model or meshes.
+
+To visualize a result, select a local *Reference Mesh Library*. Its filenames
+must match the training mesh basenames stored in `model_params_config.json`; the
+library may have subdirectories. The module reports unavailable matches instead
+of pretending that a checkpoint contains its reference geometry.
+
 ![Fossil NSM Module](https://github.com/aubricot/nsm/blob/main/images/fossilnsmmodule.png)
 *Screenshot of shape completion results produced using Fossil NSM Module in 3D Slicer*
 
