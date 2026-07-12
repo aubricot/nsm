@@ -39,6 +39,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.referenceMeshDirectory = None
         self.classificationMatches = []
         self._classificationNodes = []
+        self._plotsRenderedFor = None
 
         FossilNsmLogic.installDependenciesIfNeeded()
 
@@ -202,6 +203,16 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             self.plotStatusLabel.setText("Latent files not found. Re-run classification.")
             return
 
+        # Only (re)compute the embeddings when the classification result changed.
+        # Switching tabs re-applies the layout but reuses the existing plot nodes.
+        cacheKey = os.path.getmtime(fossilLatentPath)
+        if self._plotsRenderedFor == cacheKey and slicer.mrmlScene.GetFirstNodeByName("PCA_chart"):
+            self.plotStatusLabel.setText("Plots rendered (cached).")
+            return
+
+        self.plotStatusLabel.setText("Computing PCA / t-SNE / UMAP...")
+        slicer.app.processEvents()
+
         allLatents = np.load(allLatentsPath)
         fossilLatent = np.load(fossilLatentPath)
         top5Indices = np.load(top5IndicesPath)
@@ -212,8 +223,14 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         pcaCoords = PCA(n_components=2).fit_transform(combined)
         tsneCoords = TSNE(n_components=2, random_state=42).fit_transform(combined)
 
+        import umap
+        umapCoords = umap.UMAP(n_components=2, random_state=42).fit_transform(combined)
+
         self._buildPlot(pcaCoords, fossilIdx, top5Indices, "PCAPlot", "PCA")
         self._buildPlot(tsneCoords, fossilIdx, top5Indices, "TSNEPlot", "t-SNE")
+        self._buildPlot(umapCoords, fossilIdx, top5Indices, "UMAPPlot", "UMAP")
+
+        self._plotsRenderedFor = cacheKey
         self.plotStatusLabel.setText("Plots rendered.")
 
     def _buildPlot(self, coords, fossilIdx, top5Indices, viewTag, title):
@@ -275,6 +292,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self._clearClassificationNodes()
         slicer.mrmlScene.Clear(0)
         self.classificationMatches = []
+        self._plotsRenderedFor = None
         self.classificationTable.setRowCount(0)
         self.updateRunButton()
         self.onLogMessage("Scene cleared.", color="#4CAF50")
@@ -301,6 +319,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             return
         with open(self._classificationResultPath, encoding="utf-8") as stream:
             self.classificationMatches = json.load(stream).get("matches", [])
+        self._plotsRenderedFor = None
         self._updateClassificationTable()
         self.onLogMessage("\n\n\nClassification complete. \nTop-5 matches saved to " + self._classificationResultPath, color="#4CAF50")
 
@@ -450,6 +469,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         <layout type="horizontal" split="false">
         <item><view class="vtkMRMLPlotViewNode" singletontag="PCAPlot"><property name="viewlabel" action="default">PCA</property></view></item>
         <item><view class="vtkMRMLPlotViewNode" singletontag="TSNEPlot"><property name="viewlabel" action="default">t-SNE</property></view></item>
+        <item><view class="vtkMRMLPlotViewNode" singletontag="UMAPPlot"><property name="viewlabel" action="default">UMAP</property></view></item>
         </layout>
         """
         layoutNode = slicer.app.layoutManager().layoutLogic().GetLayoutNode()

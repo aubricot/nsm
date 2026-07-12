@@ -316,6 +316,11 @@ class FossilNsmLogic(ScriptedLoadableModuleLogic):
             slicer.util.pip_install("scikit-learn")
 
         try:
+            import umap
+        except ImportError:
+            slicer.util.pip_install("umap-learn")
+
+        try:
             import torch
         except ImportError:
             slicer.util.pip_install("torch")
