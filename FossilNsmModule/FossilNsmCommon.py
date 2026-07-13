@@ -30,6 +30,7 @@ class FossilNsmCommonWidget:
         inputCollapsible.text = "Inputs"
         parentLayout.addWidget(inputCollapsible)
         inputLayout = qt.QFormLayout(inputCollapsible)
+        self.inputLayout = inputLayout
 
         self.modelRootButton = qt.QPushButton("Select Model Root (run_vXX)...")
         self.modelRootLabel = qt.QLabel("No model selected")
@@ -314,6 +315,11 @@ class FossilNsmLogic(ScriptedLoadableModuleLogic):
             import sklearn
         except ImportError:
             slicer.util.pip_install("scikit-learn")
+
+        try:
+            import umap
+        except ImportError:
+            slicer.util.pip_install("umap-learn")
 
         try:
             import torch

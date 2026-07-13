@@ -39,6 +39,14 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.referenceMeshDirectory = None
         self.classificationMatches = []
         self._classificationNodes = []
+        self._plotsRenderedFor = None
+        self._classificationMode = "single"
+        self._allLatentsPath = None
+        self._fossilLatentPath = None
+        self._top5IndicesPath = None
+        self.inputFolderPath = None
+        self._bulkResults = []
+        self._bulkAllLatentsPath = None
 
         FossilNsmLogic.installDependenciesIfNeeded()
 
@@ -62,6 +70,14 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         inferenceLayout.setContentsMargins(0, 0, 0, 0)
         self.tabWidget.addTab(inferenceTab, "Inference")
         self.addFossilNsmInputSection(inferenceLayout)
+
+        self.inputFolderButton = qt.QPushButton("Select Input Folder...")
+        self.inputFolderButton.connect("clicked(bool)", self.onSelectInputFolder)
+        self.inputFolderLabel = qt.QLabel("No folder selected (for batch classification)")
+        self.inputFolderLabel.setWordWrap(True)
+        self.inputLayout.addRow("Input Folder (Batch):", self.inputFolderButton)
+        self.inputLayout.addRow("", self.inputFolderLabel)
+
         inferenceLayout.addWidget(self.statusLog)
 
         # Reference library + iterations at bottom of Inference tab
@@ -83,7 +99,12 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.classifyButton = qt.QPushButton("Classify Input Mesh")
         self.classifyButton.setEnabled(False)
         self.classifyButton.connect("clicked(bool)", self.onClassifyInputMesh)
-        inferenceBottomLayout.addRow(self.classifyButton)   
+        inferenceBottomLayout.addRow(self.classifyButton)
+
+        self.classifyFolderButton = qt.QPushButton("Classify Folder (Batch)")
+        self.classifyFolderButton.setEnabled(False)
+        self.classifyFolderButton.connect("clicked(bool)", self.onClassifyFolder)
+        inferenceBottomLayout.addRow(self.classifyFolderButton)
 
         self.refreshButton = qt.QPushButton("Refresh (Clear Scene)")
         self.refreshButton.connect("clicked(bool)", self.onRefreshScene)
@@ -123,6 +144,31 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
 
         self.tabWidget.addTab(explorePlotsTab, "Explore Plots")
 
+        # Tab 4 — Batch Results (one row per input mesh from a folder run)
+        batchResultsTab = qt.QWidget()
+        batchResultsLayout = qt.QVBoxLayout(batchResultsTab)
+        batchResultsLayout.setContentsMargins(4, 4, 4, 4)
+
+        self.batchStatusLabel = qt.QLabel("Run 'Classify Folder' to populate batch results.")
+        self.batchStatusLabel.setWordWrap(True)
+        batchResultsLayout.addWidget(self.batchStatusLabel)
+
+        self.bulkTable = qt.QTableWidget(0, 3)
+        self.bulkTable.setHorizontalHeaderLabels(["Input mesh", "Top match", "Cosine distance"])
+        self.bulkTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
+        self.bulkTable.setSelectionMode(qt.QAbstractItemView.SingleSelection)
+        self.bulkTable.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+        self.bulkTable.horizontalHeader().setStretchLastSection(True)
+        self.bulkTable.horizontalHeader().setSectionResizeMode(qt.QHeaderView.Stretch)
+        self.bulkTable.connect("itemSelectionChanged()", self.onBulkRowSelected)
+        batchResultsLayout.addWidget(self.bulkTable, 1)
+
+        batchHint = qt.QLabel("Select a row to load that mesh into the Explore Meshes and Explore Plots tabs.")
+        batchHint.setWordWrap(True)
+        batchResultsLayout.addWidget(batchHint)
+
+        self._batchTabIndex = self.tabWidget.addTab(batchResultsTab, "Batch Results")
+
         self.classificationTable = qt.QTableWidget(0, 3)
         self.classificationTable.setHorizontalHeaderLabels(["Reference mesh", "Cosine distance", "Available"])
         self.classificationTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
@@ -143,64 +189,136 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.referenceMeshesLabel.setText(path)
         self._updateClassificationTable()
 
+    def _modelReady(self):
+        return bool(
+            self.modelRootPath
+            and self.configFilePath
+            and self.modelFilePath
+            and self.latentCodesFilePath
+            and self.outputFolderPath
+        )
+
     def updateRunButton(self):
         self.classifyButton.setEnabled(self.commonInputsReady())
+        self.classifyFolderButton.setEnabled(self._modelReady() and bool(self.inputFolderPath))
 
-    def onClassifyInputMesh(self):
+    def onSelectInputFolder(self):
+        path = qt.QFileDialog.getExistingDirectory(None, "Select Folder of Meshes to Classify")
+        if not path:
+            return
+        self.inputFolderPath = path
+        self.inputFolderLabel.setText(path)
+        self.updateRunButton()
+
+    def _readIterations(self):
         try:
             iterations = int(self.classificationIterationsInput.text)
             if iterations < 1:
                 raise ValueError
+            return iterations
         except ValueError:
             slicer.util.errorDisplay("Latent optimization iterations must be a positive integer.")
+            return None
+
+    def onClassifyInputMesh(self):
+        iterations = self._readIterations()
+        if iterations is None:
             return
 
         resultDirectory = os.path.join(self.outputFolderPath, "classification")
         os.makedirs(resultDirectory, exist_ok=True)
         inputBase = os.path.splitext(os.path.basename(self.inputFilePath))[0]
-        self._classificationResultPath = os.path.join(resultDirectory, inputBase + "_top5.json")
+        resultPath = os.path.join(resultDirectory, inputBase + "_top5.json")
         logPath = os.path.join(resultDirectory, inputBase + "_classification.log")
+
+        self._classificationMode = "single"
+        self._allLatentsPath = os.path.join(resultDirectory, "all_latents.npy")
+        self._fossilLatentPath = os.path.join(resultDirectory, "fossil_latent.npy")
+        self._top5IndicesPath = os.path.join(resultDirectory, "top5_indices.npy")
+
+        self.onLogMessage("Starting nearest-mesh classification (latent optimization may take several minutes)...\n\n\n", color="#4CAF50")
+        self._runWorker([
+            "--input_mesh", self.inputFilePath, "--output_dir", resultDirectory,
+            "--iterations", str(iterations),
+        ], resultPath, logPath)
+
+    def onClassifyFolder(self):
+        iterations = self._readIterations()
+        if iterations is None:
+            return
+
+        folderPath = self.inputFolderPath
+        if not folderPath or not os.path.isdir(folderPath):
+            slicer.util.errorDisplay("Select an input folder first (Input Folder (Batch)).")
+            return
+
+        resultDirectory = os.path.join(self.outputFolderPath, "classification")
+        os.makedirs(resultDirectory, exist_ok=True)
+        resultPath = os.path.join(resultDirectory, "bulk_summary.json")
+        logPath = os.path.join(resultDirectory, "bulk_classification.log")
+
+        self._classificationMode = "bulk"
+        self.batchStatusLabel.setText("Classifying folder: " + folderPath)
+        self.onLogMessage("Starting BATCH classification of folder:\n{}\n(each mesh runs a full latent optimization)\n\n\n".format(folderPath), color="#4CAF50")
+        self._runWorker([
+            "--input_dir", folderPath, "--output_dir", resultDirectory,
+            "--iterations", str(iterations),
+        ], resultPath, logPath)
+
+    def _runWorker(self, extraArgs, resultPath, logPath):
         workerScript = os.path.join(os.path.dirname(os.path.dirname(__file__)), "classification_slicer.py")
+        self._classificationResultPath = resultPath
         self._classificationLog = open(logPath, "w")
         self._classificationLogReadPos = 0
         self._classificationLogPath = logPath
         self.classifyButton.setEnabled(False)
-        self.onLogMessage("Starting nearest-mesh classification (latent optimization may take several minutes)...\n\n\n", color="#4CAF50")
-        self._classificationProcess = subprocess.Popen([
+        self.classifyFolderButton.setEnabled(False)
+        command = [
             sys.executable, workerScript, "--config", self.configFilePath,
             "--model", self.modelFilePath, "--latent_codes", self.latentCodesFilePath,
-            "--input_mesh", self.inputFilePath, "--output_dir", resultDirectory,
-            "--result", self._classificationResultPath, "--iterations", str(iterations),
-        ], stdout=self._classificationLog, stderr=subprocess.STDOUT)
+            "--result", resultPath,
+        ] + extraArgs
+        self._classificationProcess = subprocess.Popen(
+            command, stdout=self._classificationLog, stderr=subprocess.STDOUT)
         self._classificationTimer = qt.QTimer()
         self._classificationTimer.setInterval(500)
         self._classificationTimer.timeout.connect(self._pollClassification)
         self._classificationTimer.start()
 
     def onTabChanged(self, index):
-        if index == 0:
-            slicer.app.layoutManager().setLayout(self.previousLayout)
-        elif index == 1:
+        if index == 1:
             self._applyMeshLayout()
-            self._loadMeshesIntoViewers()  
+            self._loadMeshesIntoViewers()
             self._linkMeshViewers()
             self._styleViewers()
         elif index == 2:
             self._applyPlotLayout()
             self._renderLatentSpacePlots()
+        else:
+            slicer.app.layoutManager().setLayout(self.previousLayout)
 
     def _renderLatentSpacePlots(self):
         if not self.classificationMatches:
             self.plotStatusLabel.setText("Run classification first.")
             return
-        resultDirectory = os.path.join(self.outputFolderPath, "classification")
-        allLatentsPath = os.path.join(resultDirectory, "all_latents.npy")
-        fossilLatentPath = os.path.join(resultDirectory, "fossil_latent.npy")
-        top5IndicesPath = os.path.join(resultDirectory, "top5_indices.npy")
+        allLatentsPath = self._allLatentsPath
+        fossilLatentPath = self._fossilLatentPath
+        top5IndicesPath = self._top5IndicesPath
 
-        if not all(os.path.isfile(p) for p in [allLatentsPath, fossilLatentPath, top5IndicesPath]):
+        if not (allLatentsPath and fossilLatentPath and top5IndicesPath
+                and all(os.path.isfile(p) for p in [allLatentsPath, fossilLatentPath, top5IndicesPath])):
             self.plotStatusLabel.setText("Latent files not found. Re-run classification.")
             return
+
+        # Only (re)compute the embeddings when the classification result changed.
+        # Switching tabs re-applies the layout but reuses the existing plot nodes.
+        cacheKey = (fossilLatentPath, os.path.getmtime(fossilLatentPath))
+        if self._plotsRenderedFor == cacheKey and slicer.mrmlScene.GetFirstNodeByName("PCA_chart"):
+            self.plotStatusLabel.setText("Plots rendered (cached).")
+            return
+
+        self.plotStatusLabel.setText("Computing PCA / t-SNE / UMAP...")
+        slicer.app.processEvents()
 
         allLatents = np.load(allLatentsPath)
         fossilLatent = np.load(fossilLatentPath)
@@ -212,8 +330,14 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         pcaCoords = PCA(n_components=2).fit_transform(combined)
         tsneCoords = TSNE(n_components=2, random_state=42).fit_transform(combined)
 
+        import umap
+        umapCoords = umap.UMAP(n_components=2, random_state=42).fit_transform(combined)
+
         self._buildPlot(pcaCoords, fossilIdx, top5Indices, "PCAPlot", "PCA")
         self._buildPlot(tsneCoords, fossilIdx, top5Indices, "TSNEPlot", "t-SNE")
+        self._buildPlot(umapCoords, fossilIdx, top5Indices, "UMAPPlot", "UMAP")
+
+        self._plotsRenderedFor = cacheKey
         self.plotStatusLabel.setText("Plots rendered.")
 
     def _buildPlot(self, coords, fossilIdx, top5Indices, viewTag, title):
@@ -275,6 +399,10 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self._clearClassificationNodes()
         slicer.mrmlScene.Clear(0)
         self.classificationMatches = []
+        self._plotsRenderedFor = None
+        self._bulkResults = []
+        self.bulkTable.setRowCount(0)
+        self.batchStatusLabel.setText("Run 'Classify Folder' to populate batch results.")
         self.classificationTable.setRowCount(0)
         self.updateRunButton()
         self.onLogMessage("Scene cleared.", color="#4CAF50")
@@ -295,14 +423,61 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             return
         self._classificationTimer.stop()
         self._classificationLog.close()
-        self.classifyButton.setEnabled(True)
+        self.classifyButton.setEnabled(self.commonInputsReady())
+        self.classifyFolderButton.setEnabled(self._modelReady())
         if code != 0 or not os.path.isfile(self._classificationResultPath):
             self.onLogMessage("\n\n\nClassification failed (exit code {}).".format(code), color="red")
             return
+        if self._classificationMode == "bulk":
+            self._loadBulkResults(self._classificationResultPath)
+            return
         with open(self._classificationResultPath, encoding="utf-8") as stream:
             self.classificationMatches = json.load(stream).get("matches", [])
+        self._plotsRenderedFor = None
         self._updateClassificationTable()
         self.onLogMessage("\n\n\nClassification complete. \nTop-5 matches saved to " + self._classificationResultPath, color="#4CAF50")
+
+    def _loadBulkResults(self, summaryPath):
+        with open(summaryPath, encoding="utf-8") as stream:
+            summary = json.load(stream)
+        self._bulkResults = summary.get("results", [])
+        self._bulkAllLatentsPath = summary.get("all_latents")
+        self._populateBulkTable()
+        self.batchStatusLabel.setText(
+            "Classified {} meshes. Select a row to inspect it.".format(len(self._bulkResults)))
+        self.onLogMessage(
+            "\n\n\nBatch classification complete: {} meshes.\nSummary saved to {}".format(
+                len(self._bulkResults), summaryPath), color="#4CAF50")
+        self.tabWidget.setCurrentIndex(self._batchTabIndex)
+
+    def _populateBulkTable(self):
+        self.bulkTable.setRowCount(len(self._bulkResults))
+        for row, result in enumerate(self._bulkResults):
+            matches = result.get("matches", [])
+            top = matches[0] if matches else None
+            values = [
+                result.get("input_name", ""),
+                top["mesh_name"] if top else "-",
+                "{:.6f}".format(top["cosine_distance"]) if top else "-",
+            ]
+            for column, value in enumerate(values):
+                self.bulkTable.setItem(row, column, qt.QTableWidgetItem(value))
+
+    def onBulkRowSelected(self):
+        row = self.bulkTable.currentRow()
+        if row < 0 or row >= len(self._bulkResults):
+            return
+        result = self._bulkResults[row]
+        self.inputFilePath = result.get("input_path")
+        if self.inputFilePath:
+            self.inputFileLabel.setText(self.inputFilePath)
+        self.classificationMatches = result.get("matches", [])
+        self._allLatentsPath = self._bulkAllLatentsPath
+        self._fossilLatentPath = result.get("fossil_latent")
+        self._top5IndicesPath = result.get("top5_indices")
+        self._plotsRenderedFor = None
+        self._updateClassificationTable()
+        self.onLogMessage("Loaded batch result: " + result.get("input_name", ""), color="#4CAF50")
 
     def _referencePath(self, match):
         if not self.referenceMeshDirectory:
@@ -450,6 +625,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         <layout type="horizontal" split="false">
         <item><view class="vtkMRMLPlotViewNode" singletontag="PCAPlot"><property name="viewlabel" action="default">PCA</property></view></item>
         <item><view class="vtkMRMLPlotViewNode" singletontag="TSNEPlot"><property name="viewlabel" action="default">t-SNE</property></view></item>
+        <item><view class="vtkMRMLPlotViewNode" singletontag="UMAPPlot"><property name="viewlabel" action="default">UMAP</property></view></item>
         </layout>
         """
         layoutNode = slicer.app.layoutManager().layoutLogic().GetLayoutNode()
