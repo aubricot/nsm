@@ -19,15 +19,6 @@ from NSM.optimization import get_top_k_pcs, optimize_latent
 import pymskt.mesh.meshTools as meshTools
 import pyvista as pv
 
-def set_reproducible_seed(seed=42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
-
 
 def patch_signed_distance_dtype():
     original = meshTools.pcu.signed_distance_to_mesh
@@ -76,7 +67,6 @@ def _classify_one(mesh_path, config, model, latent_codes, mean_latent, top_k_reg
     """Optimize a latent for one mesh and return (matches, latent_np, top_indices)."""
     mesh_path = _prepare_mesh(mesh_path, args.output_dir)
     print("Classification mesh: {}".format(mesh_path))
-    set_reproducible_seed(args.seed)
     dataset = SDFSamples(
         list_mesh_paths=[mesh_path], multiprocessing=False,
         subsample=config["samples_per_object_per_batch"], print_filename=True,
@@ -87,11 +77,8 @@ def _classify_one(mesh_path, config, model, latent_codes, mean_latent, top_k_reg
         norm_pts=config["normalize_pts"], scale_method=config["scale_method"],
         reference_mesh=None, verbose=config["verbose"], save_cache=config["cache"],
         equal_pos_neg=config["equal_pos_neg"], fix_mesh=config["fix_mesh"],
-        random_seed=args.seed,
     )
-    set_reproducible_seed(args.seed)
     sample, _ = dataset[0]
-    set_reproducible_seed(args.seed)
     latent = optimize_latent(
         model, sample["xyz"].to(device), sample["gt_sdf"].to(device),
         config["latent_size"], top_k_reg, mean_latent, latent_codes,
@@ -129,8 +116,6 @@ def classify(args):
     meshes.Mesh.point_coords = property(fixed_point_coords)
     patch_signed_distance_dtype()
     os.makedirs(args.output_dir, exist_ok=True)
-    set_reproducible_seed(args.seed)
-    print("Classification seed: {}".format(args.seed))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     config, model, latent_codes, mean_latent, top_k_reg = _load_model_bundle(args, device)
@@ -193,7 +178,6 @@ if __name__ == "__main__":
     parser.add_argument("--result", required=True)
     parser.add_argument("--iterations", type=int, default=1000)
     parser.add_argument("--learning_rate", type=float, default=1e-3)
-    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     if not args.input_mesh and not args.input_dir:
         parser.error("Provide --input_mesh (single file) or --input_dir (folder).")
