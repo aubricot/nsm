@@ -102,11 +102,34 @@ def get_learning_rate_schedules(config):
 
 
 def adjust_learning_rate(lr_schedules, optimizer, epoch, verbose=False):
-    if verbose is True:
-        print("optimizer param groups: ", optimizer.param_groups)
-        print("lr_schedules: ", lr_schedules)
-    for i, param_group in enumerate(optimizer.param_groups):
-        param_group["lr"] = lr_schedules[i].get_learning_rate(epoch)
+    """
+    Prior to this fix (all Adam/AdamW runs from May 2023 → Jul 2026), the two
+    `LearningRateSchedule` entries were applied swapped at runtime: latents trained under
+    entry 0, the model under entry 1. To reproduce a historical Adam/AdamW run with fixed
+    code, swap the two entries in that run's config. Runs using `schedule_free_*` optimizers
+    already used the intended mapping — do **not** swap those configs.   
+    """
+    if len(lr_schedules) < 2:
+        raise ValueError(
+            f"Expected at least 2 lr_schedules (index 0 = model, index 1 = latent codes); "
+            f"got {len(lr_schedules)}"
+        )
+    for param_group in optimizer.param_groups:
+        name = param_group.get("name")
+        if name == "latent":
+            param_group["lr"] = lr_schedules[1].get_learning_rate(epoch)
+        elif name == "classification_heads" or (name is not None and name.startswith("model_")):
+            param_group["lr"] = lr_schedules[0].get_learning_rate(epoch)
+        else:
+            raise KeyError(
+                "optimizer param_group missing a recognized 'name' "
+                "('latent' or 'model_*'). If the optimizer state was loaded from a "
+                "checkpoint, names must be re-injected after load_state_dict "
+                "(torch drops custom group keys) — see rename_optimizer_param_groups()."
+            )
+        
+        if verbose:
+            print(f"{name}: {param_group['lr']}")
 
 
 def save_latent_vectors(config, epoch, latent_vec, latent_codes_subdir="latent_codes"):
@@ -124,31 +147,38 @@ def save_latent_vectors(config, epoch, latent_vec, latent_codes_subdir="latent_c
 
 
 def save_model(config, epoch, decoder, model_subdir="model", optimizer=None):
-    if type(decoder) not in (list, tuple):
+    """
+    Save decoder checkpoint.
+
+    Stores optimizer state and explicit optimizer param-group names so semantic
+    group identity can be restored after optimizer.load_state_dict().
+    """
+    if not isinstance(decoder, (list, tuple)):
         decoder = [decoder]
 
     filename = f"{epoch}.pth"
 
+    optimizer_state = None
+    optimizer_group_names = None
+    if optimizer is not None:
+        optimizer_group_names = [group.get("name") for group in optimizer.param_groups]
+        if any(name is None for name in optimizer_group_names):
+            raise ValueError("All optimizer param groups must have a 'name' before saving.")
+        optimizer_state = optimizer.state_dict()
+
     for decoder_idx, decoder_ in enumerate(decoder):
-        if len(decoder) > 1:
-            model_subdir_ = model_subdir + f"_{decoder_idx}"
-        else:
-            model_subdir_ = model_subdir
-
+        model_subdir_ = model_subdir + f"_{decoder_idx}" if len(decoder) > 1 else model_subdir
         folder_save = os.path.join(config["experiment_directory"], model_subdir_)
-        if not os.path.exists(folder_save):
-            os.makedirs(folder_save, exist_ok=True)
+        os.makedirs(folder_save, exist_ok=True)
 
-        dict_ = {
+        checkpoint = {
             "epoch": epoch,
             "model": decoder_.state_dict(),
-            "optimizer": optimizer.state_dict() if optimizer is not None else "None",
+            "optimizer": optimizer_state,
+            "optimizer_group_names": optimizer_group_names,
         }
 
-        torch.save(
-            dict_,
-            os.path.join(folder_save, filename),
-        )
+        torch.save(checkpoint, os.path.join(folder_save, filename))
 
 
 def save_model_params(config, list_mesh_paths):
@@ -209,18 +239,39 @@ def get_latent_vecs(num_objects, config):
 
 
 def get_optimizer(model, latent_vecs, lr_schedules, optimizer="Adam", weight_decay=0.0001):
+    """
+    Construct the optimizer with named parameter groups.
+
+    The repository convention is:
+
+    - ``lr_schedules[0]`` → model/decoder parameters
+    - ``lr_schedules[1]`` → latent code parameters
+
+    Parameter groups are kept in the order ``[latent, model...]`` for checkpoint
+    compatibility, but are named (``"latent"``, ``"model_0"``, ...) so
+    :func:`adjust_learning_rate` maps schedules by name rather than by position.
+
+    .. note::
+    Prior to this fix (all Adam/AdamW runs from May 2023 → Jul 2026), the two
+    `LearningRateSchedule` entries were applied swapped at runtime: latents trained under
+    entry 0, the model under entry 1. To reproduce a historical Adam/AdamW run with fixed
+    code, swap the two entries in that run's config. Runs using `schedule_free_*` optimizers
+    already used the intended mapping — do **not** swap those configs.   
+    """
     if type(model) not in (list, tuple):
         model = [model]
 
     list_params = [
         {
+            "name": "latent",
             "params": latent_vecs.parameters(),
             "lr": lr_schedules[1].get_learning_rate(0),
         }
     ]
-    for model_ in model:
+    for idx, model_ in enumerate(model):
         list_params.append(
             {
+                "name": f"model_{idx}",
                 "params": model_.parameters(),
                 "lr": lr_schedules[0].get_learning_rate(0),
             }
@@ -240,6 +291,30 @@ def get_optimizer(model, latent_vecs, lr_schedules, optimizer="Adam", weight_dec
         raise ValueError(f"Unknown optimizer: {optimizer}")
 
     return optimizer
+
+def rename_optimizer_param_groups(optimizer, n_model_groups, has_classification_heads=False):
+    """
+    Re-apply semantic names after optimizer.load_state_dict().
+    Assumes get_optimizer() group order [latent, model_0, model_1, ...]
+    and, when present, a final classification_heads group added afterward.
+    Fallback for checkpoints saved before Jul 2026 when optimizer lr scheduling fix implemented. 
+    """
+    expected_groups = 1 + n_model_groups + int(has_classification_heads)
+    if len(optimizer.param_groups) != expected_groups:
+        raise ValueError(
+            f"Expected {expected_groups} optimizer param groups "
+            f"(1 latent, {n_model_groups} model, "
+            f"{int(has_classification_heads)} classification_heads), "
+            f"got {len(optimizer.param_groups)}"
+        )
+
+    optimizer.param_groups[0]["name"] = "latent"
+
+    for idx in range(n_model_groups):
+        optimizer.param_groups[1 + idx]["name"] = f"model_{idx}"
+
+    if has_classification_heads:
+        optimizer.param_groups[-1]["name"] = "classification_heads"
 
 
 def symmetric_chammfer(p1, p2, n_pts):

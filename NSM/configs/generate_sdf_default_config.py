@@ -65,8 +65,8 @@ config = {
     "weight_decay": 0.0001,
     # Learning Rate:
     "LearningRateSchedule": [
-        {"Type": "Step", "Initial": 0.0005, "Interval": 500, "Factor": 0.5},
-        {"Type": "Step", "Initial": 0.001, "Interval": 500, "Factor": 0.5},
+        {"Type": "Step", "Initial": 0.001, "Interval": 500, "Factor": 0.5}, # index 0 = model/decoder LR 
+        {"Type": "Step", "Initial": 0.0005, "Interval": 500, "Factor": 0.5}, # index 1 = latent-code LR
     ],
     # regularize learning:
     "grad_clip": None,

@@ -8,6 +8,7 @@ from NSM.utils import (
     get_latent_vecs,
     get_checkpoints,
     clear_gpu_cache,
+    rename_optimizer_param_groups,
 )
 from NSM.losses import eikonal_loss
 from NSM.reconstruct import (
@@ -64,9 +65,6 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
     config["checkpoints"] = get_checkpoints(config)
     config["lr_schedules"] = get_learning_rate_schedules(config)
 
-    if "resume_epoch" not in config:
-        config["resume_epoch"] = 0
-
     model = model.to(config["device"])
     # Log training results across epochs
     if use_wandb is True:
@@ -108,32 +106,44 @@ def train_deep_sdf(config, model, sdf_dataset, use_wandb=False):
 
     if config["resume_epoch"] > 1:
         print("Loading model, optimizer, and latent states from epoch", config["resume_epoch"])
-        # load the model states
-        model.load_state_dict(
-            torch.load(
-                os.path.join(
-                    config["experiment_directory"], "model", f'{config["resume_epoch"]}.pth'
-                )
-            )["model"]
+
+        model_ckpt_path = os.path.join(
+            config["experiment_directory"], "model", f'{config["resume_epoch"]}.pth'
+        )
+        latent_ckpt_path = os.path.join(
+            config["experiment_directory"], "latent_codes", f'{config["resume_epoch"]}.pth'
         )
 
-        # load the optimizer states
-        optimizer.load_state_dict(
-            torch.load(
-                os.path.join(
-                    config["experiment_directory"], "model", f'{config["resume_epoch"]}.pth'
-                )
-            )["optimizer"]
-        )
+        model_checkpoint = torch.load(model_ckpt_path, map_location=config["device"])
+        latent_checkpoint = torch.load(latent_ckpt_path, map_location=config["device"])
 
-        # load the latent vectors
-        latent_vecs.load_state_dict(
-            torch.load(
-                os.path.join(
-                    config["experiment_directory"], "latent_codes", f'{config["resume_epoch"]}.pth'
+        model.load_state_dict(model_checkpoint["model"])
+
+        optimizer_state = model_checkpoint.get("optimizer")
+        if optimizer_state is None:
+            raise ValueError(f"No optimizer state found in checkpoint: {model_ckpt_path}")
+        optimizer.load_state_dict(optimizer_state)
+
+        group_names = model_checkpoint.get("optimizer_group_names")
+        if group_names is not None:
+            if len(group_names) != len(optimizer.param_groups):
+                raise ValueError(
+                    f"optimizer_group_names length mismatch: "
+                    f"{len(group_names)} names for {len(optimizer.param_groups)} param groups"
                 )
-            )["latent_codes"]
-        )
+            for group, name in zip(optimizer.param_groups, group_names):
+                if name is None:
+                    raise ValueError("Checkpoint contains optimizer param group with missing name")
+                group["name"] = name
+        else:
+            n_model_groups = len(model) if isinstance(model, (list, tuple)) else 1
+            rename_optimizer_param_groups(
+                optimizer,
+                n_model_groups=n_model_groups,
+                has_classification_heads=False,
+            )
+
+        latent_vecs.load_state_dict(latent_checkpoint["latent_codes"])
 
     # profiler that runs if config['profiler'] is True, else a dummy profiler is used and should have no effect
     with get_profiler(config) as profiler:

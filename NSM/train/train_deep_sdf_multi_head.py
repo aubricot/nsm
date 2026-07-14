@@ -16,11 +16,18 @@ import os
 import torch
 import time
 import numpy as np
+import warnings
 
 loss_l1 = torch.nn.L1Loss(reduction="none")
 
 
 def train_deep_sdf(config, models: tuple, sdf_dataset, use_wandb=False):
+    
+    warnings.warn(
+        "train_deep_sdf_multi_head is deprecated and known-broken (only the last model's "
+        "parameters reach the optimizer; no optimizer state saving/resume). "
+        "Use train_deep_sdf with objects_per_decoder > 1 instead.",
+        DeprecationWarning, stacklevel=2,)
 
     config = add_plain_lr_to_config(config)
 

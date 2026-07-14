@@ -75,15 +75,15 @@
     "LearningRateSchedule": [
         {
             "Type": "Step",
-            "Initial": 0.005,
-            "Interval": 16.666666666666668,
-            "Factor": 0.9523809523809523
-        },
-        {
-            "Type": "Step",
             "Initial": 0.0001,
             "Interval": 1000,
             "Factor": 0.1
+        },
+        {
+            "Type": "Step",
+            "Initial": 0.005,
+            "Interval": 16.666666666666668,
+            "Factor": 0.9523809523809523
         }
     ],
     "grad_clip": null,
