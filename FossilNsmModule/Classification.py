@@ -429,7 +429,13 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         if plotType == "PCA" and self._pcaCoords is None:
             self.plotStatusLabel.setText("\n\n\nComputing PCA...")
             slicer.app.processEvents()
-            self._pcaCoords = PCA(n_components=2).fit_transform(combined)
+            pca = PCA(n_components=2)
+            self._pcaCoords = pca.fit_transform(combined)
+            self.plotStatusLabel.setText("PCA computed.\n\n"
+                                         "PC1 explained variance: {:.2f}%\n"
+                                         "PC2 explained variance: {:.2f}%".format(
+                                             100 * pca.explained_variance_ratio_[0], 
+                                             100 * pca.explained_variance_ratio_[1]))
             self._buildPlot(self._pcaCoords, fossilIdx, top5Indices, "PCA")
             print("[FossilNSM] PCA built")
 
@@ -444,8 +450,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             tsne_kwargs = dict(
                 n_components=2, perplexity=perplexity, learning_rate=learning_rate,
                 early_exaggeration=early_exaggeration, n_iter_without_progress=no_progress,
-                metric=metric, random_state=42,
-            )
+                metric=metric, random_state=42,)
             if tuple(int(x) for x in sklearn.__version__.split(".")[:2]) >= (1, 4):
                 tsne_kwargs["max_iter"] = 1000
             else:
@@ -467,8 +472,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             slicer.app.processEvents()
             self._umapCoords = umap.UMAP(
                 n_components=2, n_neighbors=n_neighbors, min_dist=min_dist,
-                spread=spread, n_epochs=n_epochs, random_state=42,
-            ).fit_transform(combined_pca)
+                spread=spread, n_epochs=n_epochs, random_state=42,).fit_transform(combined_pca)
             self._buildPlot(self._umapCoords, fossilIdx, top5Indices, "UMAP")
             print("[FossilNSM] UMAP built")
 
@@ -485,7 +489,8 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             print("[FossilNSM] ActivePlot view node NOT found")
             return
         plotViewNode.SetPlotChartNodeID(chartNode.GetID())
-        self.plotStatusLabel.setText("{} rendered.".format(plotType))
+        if plotType != "PCA":
+            self.plotStatusLabel.setText("{} rendered.".format(plotType))
         print("[FossilNSM] chart assigned to ActivePlot view")
 
     def onPlotTypeChanged(self, index):
@@ -510,49 +515,71 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
 
     def _buildPlot(self, coords, fossilIdx, top5Indices, title):
         print("[FossilNSM] _buildPlot title={}".format(title))
+        # Clean up old chart, its series, and tables in one go
+        names = [title + ext for ext in ["_chart", "_bg", "_top5", "_fossil"]]
+        old_nodes = [slicer.mrmlScene.GetFirstNodeByName(n) for n in names]
+        if old_nodes[0]:  # If the chart exists, grab its series nodes too
+            old_nodes += [old_nodes[0].GetNthPlotSeriesNode(i) for i in range(old_nodes[0].GetNumberOfPlotSeriesNodes())]
+        for node in filter(None, old_nodes):
+            slicer.mrmlScene.RemoveNode(node)
 
-        # Remove old chart and its series nodes if they exist
-        oldChart = slicer.mrmlScene.GetFirstNodeByName(title + "_chart")
-        if oldChart:
-            for i in range(oldChart.GetNumberOfPlotSeriesNodes()):
-                s = oldChart.GetNthPlotSeriesNode(i)
-                if s:
-                    slicer.mrmlScene.RemoveNode(s)
-            slicer.mrmlScene.RemoveNode(oldChart)
+        # --- Extract filenames for hover labels ---
+        train_filenames = []
+        if self.configFilePath and os.path.isfile(self.configFilePath):
+            try:
+                import json
+                with open(self.configFilePath, 'r') as f:
+                    cfg = json.load(f)
+                    train_filenames = [os.path.basename(p) for p in cfg.get('list_mesh_paths', [])]
+            except Exception as e:
+                print("[FossilNSM] Could not parse config for filenames: {}".format(e))
+        bgMask = np.ones(len(coords), dtype=bool)
+        bgMask[fossilIdx] = False
+        valid_top5 = top5Indices[top5Indices < len(coords)]
+        bgMask[valid_top5] = False
 
-        # Remove old table nodes
-        for suffix in ["_bg", "_top5", "_fossil"]:
-            old = slicer.mrmlScene.GetFirstNodeByName(title + suffix)
-            if old:
-                slicer.mrmlScene.RemoveNode(old)
+        # Build formatted string arrays
+        bgLabels = []
+        for i, is_bg in enumerate(bgMask):
+            if is_bg:
+                name = train_filenames[i] if i < len(train_filenames) else "Mesh {}".format(i)
+                bgLabels.append("\n{}".format(name))
+        top5Labels = []
+        for i, idx in enumerate(valid_top5):
+            match = self.classificationMatches[i] if i < len(self.classificationMatches) else {}
+            name = match.get("mesh_name", "Mesh {}".format(idx))
+            top5Labels.append("\nTop {} Match: {}".format(i + 1, name))
+        fossil_name = os.path.basename(self.inputFilePath) if self.inputFilePath else "Unknown"
+        fossilLabels = ["\nFossil: {}".format(fossil_name)]
 
-        def makeTable(name, x, y):
+        def makeTable(name, x, y, labels):
             t = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", name)
             t.RemoveAllColumns()
             xArr = vtk.vtkFloatArray()
             xArr.SetName("x")
             yArr = vtk.vtkFloatArray()
             yArr.SetName("y")
-            for xi, yi in zip(x, y):
+            labelArr = vtk.vtkStringArray()
+            labelArr.SetName("label")  
+            for xi, yi, li in zip(x, y, labels):
                 xArr.InsertNextValue(float(xi))
                 yArr.InsertNextValue(float(yi))
+                labelArr.InsertNextValue(str(li))
             t.AddColumn(xArr)
             t.AddColumn(yArr)
+            t.AddColumn(labelArr)
             return t
 
-        bgMask = np.ones(len(coords), dtype=bool)
-        bgMask[fossilIdx] = False
-        bgMask[top5Indices] = False
+        bgTable     = makeTable(title + "_bg",     coords[bgMask, 0],      coords[bgMask, 1],      bgLabels)
+        top5Table   = makeTable(title + "_top5",   coords[valid_top5, 0],  coords[valid_top5, 1],  top5Labels)
+        fossilTable = makeTable(title + "_fossil", [coords[fossilIdx, 0]], [coords[fossilIdx, 1]], fossilLabels)
 
-        bgTable     = makeTable(title + "_bg",     coords[bgMask, 0],      coords[bgMask, 1])
-        top5Table   = makeTable(title + "_top5",   coords[top5Indices, 0], coords[top5Indices, 1])
-        fossilTable = makeTable(title + "_fossil", [coords[fossilIdx, 0]], [coords[fossilIdx, 1]])
-
-        def makeSeries(label, table, color, size=5):
-            s = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLPlotSeriesNode", label)
+        def makeSeries(name, table, color, size=5):
+            s = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLPlotSeriesNode", name)
             s.SetAndObserveTableNodeID(table.GetID())
             s.SetXColumnName("x")
             s.SetYColumnName("y")
+            s.SetLabelColumnName("label")            
             s.SetPlotType(slicer.vtkMRMLPlotSeriesNode.PlotTypeScatter)
             s.SetLineStyle(slicer.vtkMRMLPlotSeriesNode.LineStyleNone)
             s.SetMarkerStyle(slicer.vtkMRMLPlotSeriesNode.MarkerStyleSquare)
@@ -566,9 +593,12 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
 
         chart = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLPlotChartNode", title + "_chart")
         chart.SetTitle(title)
-        chart.AddAndObservePlotSeriesNodeID(fossilSeries.GetID())
-        chart.AddAndObservePlotSeriesNodeID(top5Series.GetID())
+        
+        # Add to chart (fossil last so it draws on top)
         chart.AddAndObservePlotSeriesNodeID(bgSeries.GetID())
+        chart.AddAndObservePlotSeriesNodeID(top5Series.GetID())
+        chart.AddAndObservePlotSeriesNodeID(fossilSeries.GetID())
+        
         print("[FossilNSM] chart node created: {}".format(title + "_chart"))
 
     # ------------------------------------------------------------------ #
@@ -623,10 +653,8 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
     def _loadMeshesIntoViewers(self):
         if not self.classificationMatches:
             return
-
-        # Clear by tracking list first
+        # Clean up old nodes
         self._clearClassificationNodes()
-
         # Also sweep scene for any leftover nodes by known name patterns
         for nodeName in ["Input Fossil"] + ["Match {} - {}".format(m["rank"], m["mesh_name"]) for m in self.classificationMatches]:
             old = slicer.mrmlScene.GetFirstNodeByName(nodeName)
@@ -820,28 +848,35 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
                 available += 1
 
     def _clearClassificationNodes(self):
+        prefixes = ["Input Fossil", "Match 1 - ", "Match 2 - ", "Match 3 - ", "Match 4 - ", "Match 5 - ",
+                    "Top 1 - ", "Top 2 - ", "Top 3 - ", "Top 4 - ", "Top 5 - ",]
+        nodesToRemove = []
+
         for node in self._classificationNodes:
+            if node and slicer.mrmlScene.IsNodePresent(node):
+                nodesToRemove.append(node)
+
+        collection = slicer.mrmlScene.GetNodes()
+        collection.InitTraversal()
+        for _ in range(collection.GetNumberOfItems()):
+            node = collection.GetNextItemAsObject()
+            if not node:
+                continue
+            name = node.GetName() if hasattr(node, "GetName") else ""
+            if any(name.startswith(prefix) for prefix in prefixes):
+                nodesToRemove.append(node)
+
+        seen = set()
+        uniqueNodes = []
+        for node in nodesToRemove:
+            nodeID = node.GetID() if node else None
+            if nodeID and nodeID not in seen:
+                seen.add(nodeID)
+                uniqueNodes.append(node)
+        for node in uniqueNodes:
             if node and slicer.mrmlScene.IsNodePresent(node):
                 slicer.mrmlScene.RemoveNode(node)
         self._classificationNodes = []
-
-    def _showMatch(self, match, offset=0.0):
-        meshPath = self._referencePath(match)
-        if not meshPath:
-            self.onLogMessage("Reference mesh is not available: " + match["mesh_name"], color="red")
-            return None
-        node = slicer.util.loadModel(meshPath)
-        node.SetName("Top {} - {} ({:.4f})".format(match["rank"], match["mesh_name"], match["cosine_distance"]))
-        node.CreateDefaultDisplayNodes()
-        node.GetDisplayNode().SetColor(0.2, 0.65, 0.9)
-        if offset:
-            transform = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", node.GetName() + " transform")
-            transform.GetTransformToParent().Translate(offset, 0, 0)
-            node.SetAndObserveTransformNodeID(transform.GetID())
-            self._classificationNodes.append(transform)
-        self._classificationNodes.append(node)
-        return node
-
 
 class ClassificationLogic(FossilNsmLogic):
     pass
