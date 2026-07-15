@@ -10,6 +10,7 @@ typing-extensions
 
 nibabel
 scikit-learn
+metric_learn
 wandb
 matplotlib
 
