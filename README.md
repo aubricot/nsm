@@ -17,7 +17,7 @@ conda install pytorch=2.5.1 torchvision=0.20.1 torchaudio=2.5.1 pytorch-cuda=12.
 # Install NSM
 mkdir NSM
 cd NSM
-git clone https://github.com/aubricot/nsm.git
+git clone https://github.com/3D-fossils-Haag/nsm.git
 cd nsm
 python -m pip install -r requirements.txt
 pip install -e .
