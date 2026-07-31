@@ -33,6 +33,23 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
 
         self.addFossilNsmInputSection(self.layout)
 
+        # Fast Mode Collapsible Layout (one-shot encoder instead of optimization)
+        fastCollapsible = ctk.ctkCollapsibleButton()
+        fastCollapsible.text = "Fast Mode (Encoder)"
+        fastCollapsible.collapsed = True
+        self.layout.addWidget(fastCollapsible)
+        fastLayout = qt.QFormLayout(fastCollapsible)
+
+        self.fastModeCheckbox = qt.QCheckBox("Use encoder (skip latent optimization)")
+        self.fastModeCheckbox.setChecked(False)
+        fastLayout.addRow("", self.fastModeCheckbox)
+
+        self.encoderCkptInput = qt.QLineEdit("encoder/checkpoints/encoder.pt")
+        fastLayout.addRow("Encoder Checkpoint:", self.encoderCkptInput)
+
+        self.refineItersInput = qt.QLineEdit("0")
+        fastLayout.addRow("Refine Iterations:", self.refineItersInput)
+
         # Optimization Settings Collapsible Layout
         optimCollapsible = ctk.ctkCollapsibleButton()
         optimCollapsible.text = "Optimization Settings"
@@ -113,6 +130,9 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
         self.estimateUncertaintyCheckbox.connect("stateChanged(int)", self.onToggleUncertaintyOptions)
         self.propagationModeCombobox.connect("currentIndexChanged(int)", self.onToggleUncertaintyOptions)
         self.onToggleUncertaintyOptions()
+
+        self.fastModeCheckbox.connect("stateChanged(int)", self.onToggleFastMode)
+        self.onToggleFastMode()
 
         # Run Button
         self.runButton = qt.QPushButton("Run Inference")
@@ -197,6 +217,16 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
         is_mc = self.propagationModeCombobox.currentText == "montecarlo"
         self.nSamplesInput.setEnabled(enabled and is_mc)
 
+    # Toggle Fast Mode Inputs
+    def onToggleFastMode(self, state=None):
+        fast = self.fastModeCheckbox.isChecked()
+        self.encoderCkptInput.setEnabled(fast)
+        self.refineItersInput.setEnabled(fast)
+        # In fast mode the encoder replaces the optimization phases; grey them out.
+        for w in (self.phase1ItersInput, self.phase1LrInput, self.phase1LambdaInput,
+                  self.phase2ItersInput, self.phase2LrInput, self.phase2LambdaInput):
+            w.setEnabled(not fast)
+
     def updateRunButton(self):
         self.runButton.setEnabled(self.commonInputsReady())
 
@@ -239,6 +269,11 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
             "--phase2_lambda_reg", self.phase2LambdaInput.text,
             "--n_pts_per_axis", self.nPtsPerAxisInput.text,
         ]
+        if self.fastModeCheckbox.isChecked():
+            cmd.append("--fast_mode")
+            cmd.extend(["--refine_iters", self.refineItersInput.text])
+            if self.encoderCkptInput.text.strip():
+                cmd.extend(["--encoder_ckpt", self.encoderCkptInput.text.strip()])
         if self.estimateUncertaintyCheckbox.isChecked():
             cmd.append("--estimate_uncertainty")
             cmd.extend(["--propagation_mode", self.propagationModeCombobox.currentText])
