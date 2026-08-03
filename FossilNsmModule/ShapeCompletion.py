@@ -200,6 +200,8 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
         self.recallValue = qt.QLabel("0.0")
         distanceLayout.addRow(self.recall, self.recallValue)
 
+        self.addRefreshSceneButton(self.layout)
+
         self.layout.addStretch(1)
 
         self.updateRunButton()
@@ -229,6 +231,17 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
 
     def updateRunButton(self):
         self.runButton.setEnabled(self.commonInputsReady())
+
+    def onAfterSceneCleared(self):
+        self.outputPath = None
+        self._resultPath = None
+        self.calculateDistsButton.setEnabled(False)
+        self.chamferDistanceValue.setText("0.0")
+        self.averageSymmetricSurfaceDistanceValue.setText("0.0")
+        self.fScoreValue.setText("0.0")
+        self.precisionValue.setText("0.0")
+        self.recallValue.setText("0.0")
+        self.statusLog.clear()
 
     # Inference
     def onRunInference(self):
