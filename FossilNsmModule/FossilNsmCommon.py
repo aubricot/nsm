@@ -164,6 +164,10 @@ class FossilNsmCommonWidget:
         self.latentCodesFileLabel.setText(latents)
         self.outputFolderLabel.setText(output)
 
+        encoderCkpt = os.path.join(path, "encoder", "checkpoints", "encoder.pt")
+        if hasattr(self, "encoderCkptInput"):
+            self.encoderCkptInput.setText(encoderCkpt if os.path.isfile(encoderCkpt) else "")
+
         self.updateRunButton()
 
     def onSelectInputFile(self):
@@ -192,6 +196,20 @@ class FossilNsmCommonWidget:
             self.statusLog.append('<span style="color:{};">{}</span>'.format(color, html_message))
         else:
             self.statusLog.append(html_message)
+
+    def addRefreshSceneButton(self, parentLayout):
+        self.refreshButton = qt.QPushButton("Refresh (Clear Scene)")
+        self.refreshButton.connect("clicked(bool)", self.onRefreshScene)
+        parentLayout.addRow(self.refreshButton) if hasattr(parentLayout, "addRow") else parentLayout.addWidget(self.refreshButton)
+
+    def onRefreshScene(self):
+        slicer.mrmlScene.Clear(0)
+        self.onAfterSceneCleared()
+        self.updateRunButton()
+        self.onLogMessage("Scene cleared.", color="#4CAF50")
+
+    def onAfterSceneCleared(self):
+        pass
 
     def registerMeshLayout(self):
         layoutDescription = """
@@ -285,6 +303,11 @@ class FossilNsmLogic(ScriptedLoadableModuleLogic):
             import cv2
         except ImportError:
             slicer.util.pip_install("opencv-python")
+
+        try:
+            import pandas
+        except ImportError:
+            slicer.util.pip_install("pandas")
 
         try:
             import nibabel

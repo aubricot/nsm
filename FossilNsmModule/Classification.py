@@ -128,9 +128,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         loadPreviousHint.setWordWrap(True)
         inferenceBottomLayout.addRow("", loadPreviousHint)
 
-        self.refreshButton = qt.QPushButton("Refresh (Clear Scene)")
-        self.refreshButton.connect("clicked(bool)", self.onRefreshScene)
-        inferenceBottomLayout.addRow(self.refreshButton)
+        self.addRefreshSceneButton(inferenceBottomLayout)
 
         # Tab 2 — Explore Meshes
         exploreMeshesTab = qt.QWidget()
@@ -874,9 +872,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
     #  Classification helpers
     # ------------------------------------------------------------------ #
 
-    def onRefreshScene(self):
-        self._clearClassificationNodes()
-        slicer.mrmlScene.Clear(0)
+    def onAfterSceneCleared(self):
         self.classificationMatches = []
         self._plotsRenderedFor = None
         self._pcaCoords = None
@@ -889,8 +885,8 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.bulkTable.setRowCount(0)
         self.batchStatusLabel.setText("Run 'Classify Folder' to populate batch results.")
         self.classificationTable.setRowCount(0)
-        self.updateRunButton()
-        self.onLogMessage("Scene cleared.", color="#4CAF50")
+        self._classificationNodes = []
+        self._clearClassificationNodes()
 
     def _pollClassification(self):
         try:
