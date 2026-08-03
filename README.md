@@ -51,6 +51,46 @@ cd NSM/nsm
 python train_model.py
 ```
 
+## Fast Shape Completion (Encoder)
+
+The Slicer shape completion module normally recovers a latent code by test-time
+optimization (thousands of iterations). The `encoder/` package trains a
+feed-forward PointNet encoder that infers the latent from a partial point cloud
+in a single forward pass, giving near-identical reconstructions ~10,000x faster.
+
+The encoder is distilled from a trained model, so you build one directly from an
+existing `run_` folder (which holds `model_params_config.json`,
+`model/<epoch>.pth`, and `latent_codes/<epoch>.pth`):
+
+```bash
+conda activate NSM
+cd NSM/nsm
+
+# 1. Build the training set: for each latent code, marching-cubes the decoder
+#    into a surface and store the (surface_points -> latent) pair.
+python encoder/generate_latent_dataset.py \
+    --config run_v44/model_params_config.json \
+    --model run_v44/model/3000.pth \
+    --latent_codes run_v44/latent_codes/3000.pth \
+    --out encoder/data/latent_surface_dataset.pt
+
+# 2. Train the encoder (random cropping teaches partial -> full completion).
+python encoder/train_encoder.py \
+    --data encoder/data/latent_surface_dataset.pt \
+    --out encoder/checkpoints/encoder.pt
+
+# 3. (optional) Validate quality and speed vs. the optimizer.
+python encoder/evaluate_shape_completion.py \
+    --config run_v44/model_params_config.json \
+    --model run_v44/model/3000.pth \
+    --latent_codes run_v44/latent_codes/3000.pth \
+    --encoder encoder/checkpoints/encoder.pt
+```
+
+Point the Slicer module's "Fast Mode (Encoder)" option at the resulting
+`encoder/checkpoints/encoder.pt`. Retrain the encoder whenever the underlying
+model/latent codes change, since it is specific to that decoder.
+
 ## Model Loading
 
 NSM provides a convenient model loader that simplifies loading pre-trained Neural Shape Models. For **trained models**, you'll have:

@@ -21,11 +21,41 @@ def pv_to_tiny3d(mesh_pv):
     mesh_o3d.compute_vertex_normals()
     return mesh_o3d
 
+def encoder_latent(encoder_ckpt, points_full, sdf_full, device, surf_thresh=0.01):
+    """Fast mode: predict the full-shape latent from partial near-surface points
+    in one forward pass."""
+    from encoder.pointnet_encoder import PointNetEncoder
+
+    if not os.path.isabs(encoder_ckpt):
+        encoder_ckpt = os.path.join(os.path.dirname(os.path.abspath(__file__)), encoder_ckpt)
+    ckpt = torch.load(encoder_ckpt, map_location=device)
+    enc = PointNetEncoder(latent_size=ckpt["latent_size"]).to(device)
+    enc.load_state_dict(ckpt["model"])
+    enc.eval()
+    n_points = ckpt["n_points"]
+
+    abs_sdf = sdf_full.abs().squeeze()
+    surf = points_full[abs_sdf < surf_thresh]
+    if surf.shape[0] < 32:
+        # Not enough near-surface samples: fall back to the k smallest |sdf|.
+        k = min(n_points, points_full.shape[0])
+        idx = torch.topk(abs_sdf, k, largest=False).indices
+        surf = points_full[idx]
+
+    n = surf.shape[0]
+    sel = np.random.choice(n, n_points, replace=n < n_points)
+    surf = surf[sel]
+    with torch.no_grad():
+        z = enc(surf.unsqueeze(0).to(device))
+    return z
+
+
 def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_path=None, output_folder_path=None,
          estimate_uncertainty=False, propagation_mode='analytical', data_std=2e-5, latent_prior_std=5e-4,
          data_weight=1.0, latent_weight=1.0, mc_samples=2000, n_triangles=5000,
          n_samples=240, phase1_iters=3000, phase1_lr=1e-4, phase1_lambda_reg=1e-3,
-         phase2_iters=8000, phase2_lr=1e-5, phase2_lambda_reg=1e-5, n_pts_per_axis=256):
+         phase2_iters=8000, phase2_lr=1e-5, phase2_lambda_reg=1e-5, n_pts_per_axis=256,
+         fast_mode=False, encoder_ckpt=None, refine_iters=0):
     USE_TINY3D = True  # Set this flag based on Slicer environment
 
     # Dynamically import open3d/tiny3d depending on USE_TINY3D
@@ -134,28 +164,37 @@ def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_p
         print("\n-----Setting up dataset-----\n")
         sdf_sample = sdf_dataset[0]  # returns a dict
         sample_dict, _ = sdf_sample
-        points = sample_dict['xyz'].to(device) # shape: [N, 3]
-        sdf_vals = sample_dict['gt_sdf'].to(device)  # shape: [N, 1]
+        points_full = sample_dict['xyz'].to(device).squeeze()      # shape: [N, 3]
+        sdf_full = sample_dict['gt_sdf'].to(device).reshape(-1, 1)  # shape: [N, 1]
 
-        # Use a subset of the points for optizimation/reconstruction
-        indices = torch.randperm(points.size(0))[:n_samples] # Generate n_samples random indices
-        # Downsample the points and SDF values
-        points = points[indices]
-        points = points.squeeze()
-        sdf_vals = sdf_vals[indices]
-        sdf_vals = sdf_vals.reshape(-1, 1)
+        # Use a subset of the points for optimization/refinement
+        indices = torch.randperm(points_full.size(0))[:n_samples] # Generate n_samples random indices
+        points = points_full[indices].squeeze()
+        sdf_vals = sdf_full[indices].reshape(-1, 1)
 
-        # Optimize latents
-        print("\n-----Optimizing latents----\n")
-        # Phase 1 - Coarse Optimization - get a global shape in the right area of latent space (close to target specimen (far enough from mean); but not so far from mean that it is noisy or unrealistic)
-        latent_partial, _ = optimize_latent_partial(model, points.squeeze(), sdf_vals, config['latent_size'], mean_latent=mean_latent, latent_init=latent_codes, top_k=top_k_reg, 
-                                                         iters=phase1_iters, lr=phase1_lr, lambda_reg=phase1_lambda_reg, clamp_val=1.0, latent_std=latent_std, scheduler_step=800, scheduler_gamma=0.9, 
-                                                         batch_inference_size=32768, multi_stage=False, device=device)
-        # Phase 2 - Refinement - emphasis on local SDF samples and surface consistency to refine target specimen shape
-        latent_partial, _ = optimize_latent_partial(model, points.squeeze(), sdf_vals, config['latent_size'], latent_init=latent_partial, top_k=top_k_reg, 
-                                                             iters=phase2_iters, lr=phase2_lr, lambda_reg=phase2_lambda_reg, clamp_val=None, latent_std=latent_std, scheduler_step=800, scheduler_gamma=0.7, 
-                                                             batch_inference_size=32768, multi_stage=True, device=device) # True because second stage using already initialized latent
-        print("\nTranslated novel mesh into latent space!\n")
+        if fast_mode:
+            # ---- Fast mode: one-shot encoder instead of full latent optimization ----
+            print("\n-----Fast mode: encoding latent (single forward pass)----\n")
+            latent_partial = encoder_latent(encoder_ckpt, points_full, sdf_full, device)
+            if refine_iters > 0:
+                # MetaSDF-style: encoder output as a learned init + a few refine steps.
+                print(f"Refining encoder latent for {refine_iters} iters...")
+                latent_partial, _ = optimize_latent_partial(model, points.squeeze(), sdf_vals, config['latent_size'], latent_init=latent_partial, top_k=top_k_reg,
+                                                             iters=refine_iters, lr=phase2_lr, lambda_reg=phase2_lambda_reg, clamp_val=None, latent_std=latent_std, scheduler_step=800, scheduler_gamma=0.7,
+                                                             batch_inference_size=32768, multi_stage=True, device=device)
+            print("\nEncoded novel mesh into latent space!\n")
+        else:
+            # Optimize latents
+            print("\n-----Optimizing latents----\n")
+            # Phase 1 - Coarse Optimization - get a global shape in the right area of latent space (close to target specimen (far enough from mean); but not so far from mean that it is noisy or unrealistic)
+            latent_partial, _ = optimize_latent_partial(model, points.squeeze(), sdf_vals, config['latent_size'], mean_latent=mean_latent, latent_init=latent_codes, top_k=top_k_reg,
+                                                             iters=phase1_iters, lr=phase1_lr, lambda_reg=phase1_lambda_reg, clamp_val=1.0, latent_std=latent_std, scheduler_step=800, scheduler_gamma=0.9,
+                                                             batch_inference_size=32768, multi_stage=False, device=device)
+            # Phase 2 - Refinement - emphasis on local SDF samples and surface consistency to refine target specimen shape
+            latent_partial, _ = optimize_latent_partial(model, points.squeeze(), sdf_vals, config['latent_size'], latent_init=latent_partial, top_k=top_k_reg,
+                                                                 iters=phase2_iters, lr=phase2_lr, lambda_reg=phase2_lambda_reg, clamp_val=None, latent_std=latent_std, scheduler_step=800, scheduler_gamma=0.7,
+                                                                 batch_inference_size=32768, multi_stage=True, device=device) # True because second stage using already initialized latent
+            print("\nTranslated novel mesh into latent space!\n")
         
         # Reconstruction parameters
         recon_grid_origin = 1.0
@@ -260,7 +299,10 @@ def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_p
 
 if __name__ == "__main__":
 
-    modulePath = os.path.join(os.path.dirname((__file__)), 'NSM')
+    repoRoot = os.path.dirname(os.path.abspath(__file__))
+    if repoRoot not in sys.path:
+        sys.path.insert(0, repoRoot)  # so `import encoder...` (fast mode) resolves
+    modulePath = os.path.join(repoRoot, 'NSM')
     print("Module path: ", modulePath)
     if modulePath not in sys.path:
         sys.path.insert(0, modulePath)
@@ -289,6 +331,12 @@ if __name__ == "__main__":
     parser.add_argument('--phase2_lr', type=float, default=1e-5)
     parser.add_argument('--phase2_lambda_reg', type=float, default=1e-5)
     parser.add_argument('--n_pts_per_axis', type=int, default=256)
+    # Fast mode (one-shot encoder)
+    parser.add_argument('--fast_mode', action='store_true')
+    parser.add_argument('--encoder_ckpt', type=str,
+                        default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                             'encoder', 'checkpoints', 'encoder.pt'))
+    parser.add_argument('--refine_iters', type=int, default=0)
 
     # Check if we are using positional args or argparse format
     if len(sys.argv) == 6 and not sys.argv[1].startswith('-'):
@@ -323,5 +371,8 @@ if __name__ == "__main__":
             phase2_iters=args.phase2_iters,
             phase2_lr=args.phase2_lr,
             phase2_lambda_reg=args.phase2_lambda_reg,
-            n_pts_per_axis=args.n_pts_per_axis
+            n_pts_per_axis=args.n_pts_per_axis,
+            fast_mode=args.fast_mode,
+            encoder_ckpt=args.encoder_ckpt,
+            refine_iters=args.refine_iters
         )

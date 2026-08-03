@@ -14,3 +14,6 @@ literature/
 .DS_Store
 reports/
 /hierarchy/grid_search_results/
+# Encoder: regenerable data/logs/eval artifacts + model binaries (shipped separately)
+encoder/data/
+encoder/checkpoints/
