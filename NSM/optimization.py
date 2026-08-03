@@ -34,9 +34,11 @@ def get_top_k_pcs(latent_codes, threshold=0.90):
     pca = PCA()
     pca.fit(latent_np)
     cum_var = np.cumsum(pca.explained_variance_ratio_)
-    k = np.searchsorted(cum_var, threshold)
-    print(f"Selected top {k+1} PCs to explain {threshold*100:.1f}% of variance")
-    return pca, k + 1
+    k = np.searchsorted(cum_var, threshold) + 1
+    k_cap = min(latent_np.shape[0], latent_np.shape[1])
+    k = min(k, k_cap)
+    print(f"Selected top {k} PCs (cap={k_cap}) to explain ≥ {threshold*100:.1f}% of variance")
+    return pca, k
 
 # Find the top 5 most similar meshes from training data to novel/input mesh - uses L2 (euclidian) distance in latent space
 def find_similar(latent_novel, latent_codes, top_k=5, n_std=2):
