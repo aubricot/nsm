@@ -52,6 +52,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self._cachedCombined = None
         self._cachedFossilIdx = None
         self._cachedTop5Indices = None
+        self._lastExportDir = None
 
         FossilNsmLogic.installDependenciesIfNeeded()
 
@@ -83,6 +84,14 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.inputLayout.addRow("Input Folder (Batch):", self.inputFolderButton)
         self.inputLayout.addRow("", self.inputFolderLabel)
 
+        self.loadShapeCompletionButton = qt.QPushButton("Load Shape Completion Result...")
+        self.loadShapeCompletionButton.connect("clicked(bool)", self.onLoadShapeCompletionResult)
+        self.loadShapeCompletionLabel = qt.QLabel(
+            "Pick a completed mesh from a previous Shape Completion run to classify it.")
+        self.loadShapeCompletionLabel.setWordWrap(True)
+        self.inputLayout.addRow("From Shape Completion:", self.loadShapeCompletionButton)
+        self.inputLayout.addRow("", self.loadShapeCompletionLabel)
+
         inferenceLayout.addWidget(self.statusLog)
 
         inferenceBottomCollapsible = ctk.ctkCollapsibleButton()
@@ -109,6 +118,15 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.classifyFolderButton.setEnabled(False)
         self.classifyFolderButton.connect("clicked(bool)", self.onClassifyFolder)
         inferenceBottomLayout.addRow(self.classifyFolderButton)
+
+        self.loadPreviousResultsButton = qt.QPushButton("Load Previous Classification Results...")
+        self.loadPreviousResultsButton.connect("clicked(bool)", self.onLoadPreviousResults)
+        inferenceBottomLayout.addRow(self.loadPreviousResultsButton)
+        loadPreviousHint = qt.QLabel(
+            "Load a bulk_summary.json or <mesh>_top5.json to inspect a previous run "
+            "in Explore Meshes / Explore Plots.")
+        loadPreviousHint.setWordWrap(True)
+        inferenceBottomLayout.addRow("", loadPreviousHint)
 
         self.addRefreshSceneButton(inferenceBottomLayout)
 
@@ -217,6 +235,19 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.plotStatusLabel.setWordWrap(True)
         plotSidePanelLayout.addWidget(self.plotStatusLabel)
 
+        self.savePlotButton = qt.QPushButton("Save Current Plot (PNG + HTML)...")
+        self.savePlotButton.connect("clicked(bool)", self.onSaveCurrentPlot)
+        plotSidePanelLayout.addWidget(self.savePlotButton)
+
+        self.saveAllPlotsCheckbox = qt.QCheckBox("Save all computed plot types")
+        self.saveAllPlotsCheckbox.setChecked(False)
+        plotSidePanelLayout.addWidget(self.saveAllPlotsCheckbox)
+
+        self.openSaveFolderButton = qt.QPushButton("Open Save Folder")
+        self.openSaveFolderButton.setEnabled(False)
+        self.openSaveFolderButton.connect("clicked(bool)", self.onOpenSaveFolder)
+        plotSidePanelLayout.addWidget(self.openSaveFolderButton)
+
         plotSidePanelLayout.addStretch(1)
         explorePlotsOuterLayout.addWidget(plotSidePanel)
         self.tabWidget.addTab(explorePlotsTab, "Explore Plots")
@@ -243,6 +274,11 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         batchHint = qt.QLabel("Select a row to load that mesh into the Explore Meshes and Explore Plots tabs.")
         batchHint.setWordWrap(True)
         batchResultsLayout.addWidget(batchHint)
+
+        self.exportBatchButton = qt.QPushButton("Export Batch Results (CSV / TXT)...")
+        self.exportBatchButton.connect("clicked(bool)", self.onExportBatchResults)
+        batchResultsLayout.addWidget(self.exportBatchButton)
+
         self._batchTabIndex = self.tabWidget.addTab(batchResultsTab, "Batch Results")
 
         self.classificationTable = qt.QTableWidget(0, 3)
@@ -253,6 +289,10 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.classificationTable.horizontalHeader().setStretchLastSection(True)
         self.classificationTable.horizontalHeader().setSectionResizeMode(qt.QHeaderView.Stretch)
         classificationLayout.addRow("Top-5 matches:", self.classificationTable)
+
+        self.exportTopMatchesButton = qt.QPushButton("Export Top-5 (CSV / TXT)...")
+        self.exportTopMatchesButton.connect("clicked(bool)", self.onExportTopMatches)
+        classificationLayout.addRow(self.exportTopMatchesButton)
 
         self.updateRunButton()
         self.layout.addStretch(1)
@@ -268,6 +308,108 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.referenceMeshDirectory = path
         self.referenceMeshesLabel.setText(path)
         self._updateClassificationTable()
+
+    def onLoadShapeCompletionResult(self):
+        """Pick a completed mesh produced by a previous Shape Completion run and
+        classify it. Shape Completion writes '<base>_shape_completion*.vtk' files
+        into the model root's 'shape_completion/' folder (== outputFolderPath)."""
+        startDir = self.outputFolderPath if self.outputFolderPath and os.path.isdir(self.outputFolderPath) else ""
+        path = qt.QFileDialog.getOpenFileName(
+            None, "Select Shape Completion Result Mesh", startDir,
+            "Shape Completion Meshes (*_shape_completion*.vtk);;Mesh Files (*.vtk *.vtp *.stl *.obj *.ply)"
+        )
+        if not path:
+            return
+        self.inputFilePath = path
+        self.inputFileLabel.setText(path)
+        self.updateRunButton()
+        self.onLogMessage("Loaded shape completion result as input mesh:\n" + path, color="#4CAF50")
+
+    def onLoadPreviousResults(self):
+        """Load a previous classification results JSON so it can be inspected in the
+        Explore Meshes / Explore Plots / Batch Results tabs without re-running."""
+        startDir = ""
+        candidate = self._classificationDir()
+        if candidate and os.path.isdir(candidate):
+            startDir = candidate
+        elif self.modelRootPath:
+            startDir = self.modelRootPath
+        path = qt.QFileDialog.getOpenFileName(
+            None, "Select Classification Results JSON", startDir, "Results (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as stream:
+                data = json.load(stream)
+        except Exception as error:
+            slicer.util.errorDisplay("Could not read results file:\n{}".format(error))
+            return
+
+        resultDir = os.path.dirname(path)
+
+        # Bulk summary (has a "results" list) --------------------------------
+        if isinstance(data, dict) and "results" in data:
+            self._bulkResults = data.get("results", [])
+            self._bulkAllLatentsPath = data.get("all_latents")
+            if self._bulkAllLatentsPath and not os.path.isfile(self._bulkAllLatentsPath):
+                # Fall back to a sibling file if the run folder moved.
+                sibling = os.path.join(resultDir, os.path.basename(self._bulkAllLatentsPath))
+                if os.path.isfile(sibling):
+                    self._bulkAllLatentsPath = sibling
+            self._classificationMode = "bulk"
+            self._populateBulkTable()
+            self.batchStatusLabel.setText(
+                "Loaded {} previous results from {}. Select a row to inspect it.".format(
+                    len(self._bulkResults), os.path.basename(path)))
+            self.onLogMessage("Loaded previous batch results: " + path, color="#4CAF50")
+            self.tabWidget.setCurrentIndex(self._batchTabIndex)
+            return
+
+        # Single result (has a "matches" list) ------------------------------
+        if isinstance(data, dict) and "matches" in data:
+            self.classificationMatches = data.get("matches", [])
+            self._classificationMode = "single"
+            # Latent files live beside the JSON. Support both the single-run
+            # names and the per-mesh names used inside a bulk output folder.
+            base = os.path.splitext(os.path.basename(path))[0]
+            if base.endswith("_top5"):
+                base = base[: -len("_top5")]
+
+            def _pick(*names):
+                for name in names:
+                    candidate = os.path.join(resultDir, name)
+                    if os.path.isfile(candidate):
+                        return candidate
+                return None
+
+            self._allLatentsPath = _pick("all_latents.npy")
+            self._fossilLatentPath = _pick(base + "_fossil_latent.npy", "fossil_latent.npy")
+            self._top5IndicesPath = _pick(base + "_top5_indices.npy", "top5_indices.npy")
+            self._plotsRenderedFor = None
+            self._updateClassificationTable()
+
+            missing = [n for n, p in [
+                ("all_latents", self._allLatentsPath),
+                ("fossil_latent", self._fossilLatentPath),
+                ("top5_indices", self._top5IndicesPath)] if not p]
+            self.onLogMessage("Loaded previous single result: " + path, color="#4CAF50")
+            if missing:
+                self.onLogMessage(
+                    "Note: latent files {} not found next to the JSON; plots are unavailable "
+                    "for this result.".format(", ".join(missing)), color="orange")
+            self.onLogMessage(
+                "Tip: use 'Select Input Mesh' (or 'Load Shape Completion Result') to also view "
+                "the original fossil in Explore Meshes.", color="orange")
+            return
+
+        slicer.util.errorDisplay(
+            "Unrecognized results file. Expected a bulk_summary.json or a <mesh>_top5.json.")
+
+    def _classificationDir(self):
+        """Classification outputs live at run_vXX/classification/ (next to
+        shape_completion/), derived from the selected model root."""
+        root = self.modelRootPath or self.outputFolderPath
+        return os.path.join(root, "classification") if root else None
 
     def _modelReady(self):
         return bool(
@@ -304,7 +446,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         iterations = self._readIterations()
         if iterations is None:
             return
-        resultDirectory = os.path.join(self.outputFolderPath, "classification")
+        resultDirectory = self._classificationDir()
         os.makedirs(resultDirectory, exist_ok=True)
         inputBase = os.path.splitext(os.path.basename(self.inputFilePath))[0]
         resultPath = os.path.join(resultDirectory, inputBase + "_top5.json")
@@ -327,7 +469,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         if not folderPath or not os.path.isdir(folderPath):
             slicer.util.errorDisplay("Select an input folder first (Input Folder (Batch)).")
             return
-        resultDirectory = os.path.join(self.outputFolderPath, "classification")
+        resultDirectory = self._classificationDir()
         os.makedirs(resultDirectory, exist_ok=True)
         resultPath = os.path.join(resultDirectory, "bulk_summary.json")
         logPath = os.path.join(resultDirectory, "bulk_classification.log")
@@ -775,6 +917,8 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self._plotsRenderedFor = None
         self._updateClassificationTable()
         self.onLogMessage("\n\n\nClassification complete. \nTop-5 matches saved to " + self._classificationResultPath, color="#4CAF50")
+        headers, rows = self._topMatchesTable(self.classificationMatches)
+        self._autoSaveTables(os.path.splitext(self._classificationResultPath)[0], headers, rows)
 
     def _loadBulkResults(self, summaryPath):
         with open(summaryPath, encoding="utf-8") as stream:
@@ -787,6 +931,8 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.onLogMessage(
             "\n\n\nBatch classification complete: {} meshes.\nSummary saved to {}".format(
                 len(self._bulkResults), summaryPath), color="#4CAF50")
+        headers, rows = self._batchTable(self._bulkResults)
+        self._autoSaveTables(os.path.splitext(summaryPath)[0], headers, rows)
         self.tabWidget.setCurrentIndex(self._batchTabIndex)
 
     def _populateBulkTable(self):
@@ -842,6 +988,262 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
                 self.classificationTable.setItem(row, column, qt.QTableWidgetItem(value))
             if meshPath:
                 available += 1
+
+    # ------------------------------------------------------------------ #
+    #  Saving / exporting results (CSV, TXT, PNG, HTML)
+    # ------------------------------------------------------------------ #
+
+    def _noteExportDir(self, directory):
+        """Remember where the last files were written and enable 'Open Save Folder'."""
+        self._lastExportDir = directory
+        self.openSaveFolderButton.setEnabled(True)
+        self.openSaveFolderButton.setText("Open Save Folder")
+        self.openSaveFolderButton.setToolTip(directory)
+
+    def onOpenSaveFolder(self):
+        directory = self._lastExportDir
+        if not directory or not os.path.isdir(directory):
+            slicer.util.warningDisplay("No saved output folder yet — export or save a plot first.")
+            return
+        qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(directory))
+
+    def _resultsDir(self):
+        """Best directory to drop exports into: next to the loaded latent files,
+        otherwise the model's classification output folder, otherwise cwd."""
+        for path in (self._allLatentsPath, self._fossilLatentPath, self._top5IndicesPath):
+            if path and os.path.dirname(path):
+                return os.path.dirname(path)
+        candidate = self._classificationDir()
+        if candidate:
+            os.makedirs(candidate, exist_ok=True)
+            return candidate
+        return os.getcwd()
+
+    def _writeTable(self, base, headers, rows):
+        """Write the same rows as both a CSV and an aligned plain-text file.
+        Returns (csvPath, txtPath)."""
+        import csv
+        rows = [[("" if value is None else str(value)) for value in row] for row in rows]
+        csvPath, txtPath = base + ".csv", base + ".txt"
+        with open(csvPath, "w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(headers)
+            writer.writerows(rows)
+        widths = [max([len(headers[i])] + [len(row[i]) for row in rows]) for i in range(len(headers))]
+        with open(txtPath, "w", encoding="utf-8") as stream:
+            stream.write("  ".join(headers[i].ljust(widths[i]) for i in range(len(headers))) + "\n")
+            for row in rows:
+                stream.write("  ".join(row[i].ljust(widths[i]) for i in range(len(headers))) + "\n")
+        return csvPath, txtPath
+
+    def _autoSaveTables(self, base, headers, rows):
+        """Write CSV+TXT automatically after a run, alongside the JSON. Never let
+        an export error abort the classification flow."""
+        try:
+            csvPath, txtPath = self._writeTable(base, headers, rows)
+            self._noteExportDir(os.path.dirname(csvPath))
+            self.onLogMessage(
+                "Also saved CSV/TXT:\n{}\n{}".format(csvPath, txtPath), color="#4CAF50")
+        except Exception as error:
+            self.onLogMessage("Could not auto-save CSV/TXT: {}".format(error), color="orange")
+
+    def onExportTopMatches(self):
+        if not self.classificationMatches:
+            slicer.util.warningDisplay("No top-5 matches to export. Run or load a classification first.")
+            return
+        default = os.path.join(self._resultsDir(), "top5_matches.csv")
+        path = qt.QFileDialog.getSaveFileName(
+            None, "Export Top-5 Matches", default, "CSV (*.csv);;Text (*.txt)")
+        if not path:
+            return
+        headers, rows = self._topMatchesTable(self.classificationMatches)
+        csvPath, txtPath = self._writeTable(os.path.splitext(path)[0], headers, rows)
+        self._noteExportDir(os.path.dirname(csvPath))
+        self.onLogMessage("Exported top-5 matches to:\n{}\n{}".format(csvPath, txtPath), color="#4CAF50")
+
+    def _topMatchesTable(self, matches):
+        headers = ["rank", "mesh_name", "cosine_distance", "latent_index", "training_path"]
+        rows = [[
+            match.get("rank", ""),
+            match.get("mesh_name", ""),
+            "{:.6f}".format(match["cosine_distance"]) if "cosine_distance" in match else "",
+            match.get("latent_index", ""),
+            match.get("training_path", ""),
+        ] for match in matches]
+        return headers, rows
+
+    def _batchTable(self, results):
+        headers = ["input_name"]
+        for rank in range(1, 6):
+            headers += ["top{}_mesh".format(rank), "top{}_cosine".format(rank)]
+        rows = []
+        for result in results:
+            matches = result.get("matches", [])
+            row = [result.get("input_name", "")]
+            for i in range(5):
+                if i < len(matches):
+                    row += [matches[i].get("mesh_name", ""),
+                            "{:.6f}".format(matches[i]["cosine_distance"])]
+                else:
+                    row += ["", ""]
+            rows.append(row)
+        return headers, rows
+
+    def onExportBatchResults(self):
+        if not self._bulkResults:
+            slicer.util.warningDisplay("No batch results to export. Run or load 'Classify Folder' first.")
+            return
+        default = os.path.join(self._resultsDir(), "batch_results.csv")
+        path = qt.QFileDialog.getSaveFileName(
+            None, "Export Batch Results", default, "CSV (*.csv);;Text (*.txt)")
+        if not path:
+            return
+        headers, rows = self._batchTable(self._bulkResults)
+        csvPath, txtPath = self._writeTable(os.path.splitext(path)[0], headers, rows)
+        self._noteExportDir(os.path.dirname(csvPath))
+        self.onLogMessage("Exported batch results to:\n{}\n{}".format(csvPath, txtPath), color="#4CAF50")
+
+    def _ensurePlotLibs(self):
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            slicer.util.pip_install("matplotlib")
+        try:
+            import plotly  # noqa: F401
+        except ImportError:
+            slicer.util.pip_install("plotly")
+
+    def _coordsForPlotType(self, plotType):
+        return {
+            "PCA": self._pcaCoords,
+            "t-SNE": self._tsneCoords,
+            "UMAP": self._umapCoords,
+        }.get(plotType)
+
+    def _plotGroups(self, coords):
+        """Split 2D coords into (background, top-5, fossil) groups with hover labels,
+        mirroring how _buildPlot colours the interactive Slicer chart."""
+        fossilIdx = self._cachedFossilIdx
+        top5Indices = self._cachedTop5Indices
+        train_filenames = []
+        if self.configFilePath and os.path.isfile(self.configFilePath):
+            try:
+                with open(self.configFilePath, "r") as stream:
+                    cfg = json.load(stream)
+                    train_filenames = [os.path.basename(p) for p in cfg.get("list_mesh_paths", [])]
+            except Exception as error:
+                print("[FossilNSM] Could not parse config for filenames: {}".format(error))
+
+        bgMask = np.ones(len(coords), dtype=bool)
+        bgMask[fossilIdx] = False
+        valid_top5 = top5Indices[top5Indices < len(coords)]
+        bgMask[valid_top5] = False
+
+        bgLabels = [train_filenames[i] if i < len(train_filenames) else "Mesh {}".format(i)
+                    for i in range(len(coords)) if bgMask[i]]
+        top5Labels = []
+        for i, idx in enumerate(valid_top5):
+            match = self.classificationMatches[i] if i < len(self.classificationMatches) else {}
+            top5Labels.append("Top {}: {}".format(i + 1, match.get("mesh_name", "Mesh {}".format(idx))))
+        fossil_name = os.path.basename(self.inputFilePath) if self.inputFilePath else "Fossil"
+        return {
+            "bg": (coords[bgMask, 0], coords[bgMask, 1], bgLabels),
+            "top5": (coords[valid_top5, 0], coords[valid_top5, 1], top5Labels),
+            "fossil": ([coords[fossilIdx, 0]], [coords[fossilIdx, 1]], ["Fossil: " + fossil_name]),
+        }
+
+    def _savePlotFiles(self, plotType, coords, outDir):
+        groups = self._plotGroups(coords)
+        safe = plotType.replace("-", "").replace(" ", "")
+        pngPath = os.path.join(outDir, "classification_{}_plot.png".format(safe))
+        htmlPath = os.path.join(outDir, "classification_{}_plot.html".format(safe))
+        written = []
+
+        bx, by, _ = groups["bg"]
+        tx, ty, _ = groups["top5"]
+        fx, fy, _ = groups["fossil"]
+        _, _, bl = groups["bg"]
+        _, _, tl = groups["top5"]
+        _, _, fl = groups["fossil"]
+
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(figsize=(8, 6))
+            ax.scatter(bx, by, s=12, c="#808080", alpha=0.6, label="Train data")
+            ax.scatter(tx, ty, s=60, c="#33a6e6", edgecolors="k", linewidths=0.3, label="Top-5 matches")
+            ax.scatter(fx, fy, s=180, c="#e69933", marker="*", edgecolors="k", linewidths=0.5, label="Fossil")
+            ax.set_title("{} of latent space".format(plotType))
+            ax.set_xlabel("Dimension 1")
+            ax.set_ylabel("Dimension 2")
+            ax.legend(loc="best")
+            fig.tight_layout()
+            fig.savefig(pngPath, dpi=200)
+            plt.close(fig)
+            written.append(pngPath)
+        except Exception as error:
+            self.onLogMessage("Could not save PNG for {}: {}".format(plotType, error), color="red")
+
+        try:
+            import plotly.graph_objects as go
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=list(bx), y=list(by), mode="markers", name="Train data",
+                marker=dict(size=6, color="#808080"), text=bl, hoverinfo="text"))
+            fig.add_trace(go.Scatter(
+                x=list(tx), y=list(ty), mode="markers", name="Top-5 matches",
+                marker=dict(size=12, color="#33a6e6", line=dict(width=1, color="black")),
+                text=tl, hoverinfo="text"))
+            fig.add_trace(go.Scatter(
+                x=list(fx), y=list(fy), mode="markers", name="Fossil",
+                marker=dict(size=18, color="#e69933", symbol="star", line=dict(width=1, color="black")),
+                text=fl, hoverinfo="text"))
+            fig.update_layout(
+                title="{} of latent space".format(plotType),
+                xaxis_title="Dimension 1", yaxis_title="Dimension 2")
+            fig.write_html(htmlPath)
+            written.append(htmlPath)
+        except Exception as error:
+            self.onLogMessage("Could not save interactive HTML for {}: {}".format(plotType, error), color="red")
+
+        return written
+
+    def onSaveCurrentPlot(self):
+        if not self.classificationMatches:
+            slicer.util.warningDisplay("Run or load a classification result first.")
+            return
+        if self._cachedCombined is None or self._cachedFossilIdx is None:
+            slicer.util.warningDisplay(
+                "Open the Explore Plots tab first so the latent projection is computed.")
+            return
+        self._ensurePlotLibs()
+        outDir = self._resultsDir()
+
+        if self.saveAllPlotsCheckbox.checked:
+            plotTypes = ["PCA", "t-SNE", "UMAP"]
+        else:
+            plotTypes = [self.plotTypeComboBox.currentText]
+
+        saved = []
+        for plotType in plotTypes:
+            coords = self._coordsForPlotType(plotType)
+            if coords is None:
+                self.onLogMessage(
+                    "Skipping {} (not computed yet — open it in Explore Plots first).".format(plotType),
+                    color="orange")
+                continue
+            saved.extend(self._savePlotFiles(plotType, coords, outDir))
+
+        if saved:
+            self._noteExportDir(outDir)
+            self.plotStatusLabel.setText(
+                "Saved to:\n{}\n\n".format(outDir)
+                + "\n".join(os.path.basename(p) for p in saved)
+                + "\n\nUse 'Open Save Folder' to view them.")
+            self.onLogMessage("Saved plot files:\n" + "\n".join(saved), color="#4CAF50")
+        else:
+            self.onLogMessage("No plots were saved.", color="orange")
 
     def _clearClassificationNodes(self):
         prefixes = ["Input Fossil", "Match 1 - ", "Match 2 - ", "Match 3 - ", "Match 4 - ", "Match 5 - ",
