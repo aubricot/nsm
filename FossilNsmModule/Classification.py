@@ -1,6 +1,7 @@
 import glob
 import json
 import os
+import csv
 import subprocess
 import sys
 import vtk
@@ -53,6 +54,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self._cachedFossilIdx = None
         self._cachedTop5Indices = None
         self._lastExportDir = None
+        self._previousResultsBaseName = None
 
         FossilNsmLogic.installDependenciesIfNeeded()
 
@@ -123,7 +125,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.loadPreviousResultsButton.connect("clicked(bool)", self.onLoadPreviousResults)
         inferenceBottomLayout.addRow(self.loadPreviousResultsButton)
         loadPreviousHint = qt.QLabel(
-            "Load a bulk_summary.json or <mesh>_top5.json to inspect a previous run "
+            "Load bulk_summary.json or <mesh>_top5.json to inspect a previous run "
             "in Explore Meshes / Explore Plots.")
         loadPreviousHint.setWordWrap(True)
         inferenceBottomLayout.addRow("", loadPreviousHint)
@@ -310,9 +312,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self._updateClassificationTable()
 
     def onLoadShapeCompletionResult(self):
-        """Pick a completed mesh produced by a previous Shape Completion run and
-        classify it. Shape Completion writes '<base>_shape_completion*.vtk' files
-        into the model root's 'shape_completion/' folder (== outputFolderPath)."""
         startDir = self.outputFolderPath if self.outputFolderPath and os.path.isdir(self.outputFolderPath) else ""
         path = qt.QFileDialog.getOpenFileName(
             None, "Select Shape Completion Result Mesh", startDir,
@@ -326,8 +325,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.onLogMessage("Loaded shape completion result as input mesh:\n" + path, color="#4CAF50")
 
     def onLoadPreviousResults(self):
-        """Load a previous classification results JSON so it can be inspected in the
-        Explore Meshes / Explore Plots / Batch Results tabs without re-running."""
         startDir = ""
         candidate = self._classificationDir()
         if candidate and os.path.isdir(candidate):
@@ -346,6 +343,10 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             return
 
         resultDir = os.path.dirname(path)
+        base = os.path.splitext(os.path.basename(path))[0]
+        if base.endswith("_top5"):
+            base = base[: -len("_top5")]
+        self._previousResultsBaseName = base
 
         # Bulk summary (has a "results" list) --------------------------------
         if isinstance(data, dict) and "results" in data:
@@ -369,11 +370,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         if isinstance(data, dict) and "matches" in data:
             self.classificationMatches = data.get("matches", [])
             self._classificationMode = "single"
-            # Latent files live beside the JSON. Support both the single-run
-            # names and the per-mesh names used inside a bulk output folder.
-            base = os.path.splitext(os.path.basename(path))[0]
-            if base.endswith("_top5"):
-                base = base[: -len("_top5")]
 
             def _pick(*names):
                 for name in names:
@@ -406,8 +402,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             "Unrecognized results file. Expected a bulk_summary.json or a <mesh>_top5.json.")
 
     def _classificationDir(self):
-        """Classification outputs live at run_vXX/classification/ (next to
-        shape_completion/), derived from the selected model root."""
         root = self.modelRootPath or self.outputFolderPath
         return os.path.join(root, "classification") if root else None
 
@@ -507,16 +501,22 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
 
     def onTabChanged(self, index):
         print("[FossilNSM] onTabChanged index={}".format(index))
-        if index == 1:
+
+        if index == 0:  # Inference
+            self.setDefaultThreeDLayout()
+
+        elif index == 1:  # Explore Meshes
             self._applyMeshLayout()
             self._loadMeshesIntoViewers()
             self._linkMeshViewers()
             self._styleViewers()
-        elif index == 2:
+
+        elif index == 2:  # Explore Plots
             self._applyPlotLayout()
             self._renderLatentSpacePlots()
-        else:
-            slicer.app.layoutManager().setLayout(self.previousLayout)
+
+        elif index == self._batchTabIndex:  # Batch Results
+            self.setDefaultThreeDLayout()
 
     # ------------------------------------------------------------------ #
     #  Plot rendering
@@ -663,7 +663,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         for node in filter(None, old_nodes):
             slicer.mrmlScene.RemoveNode(node)
 
-        # --- Extract filenames for hover labels ---
+        # Extract filenames for hover labels
         train_filenames = []
         if self.configFilePath and os.path.isfile(self.configFilePath):
             try:
@@ -916,7 +916,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             self.classificationMatches = json.load(stream).get("matches", [])
         self._plotsRenderedFor = None
         self._updateClassificationTable()
-        self.onLogMessage("\n\n\nClassification complete. \nTop-5 matches saved to " + self._classificationResultPath, color="#4CAF50")
+        self.onLogMessage("\n\n\nClassification complete. \n\nTop-5 matches saved to " + self._classificationResultPath, color="#4CAF50")
         headers, rows = self._topMatchesTable(self.classificationMatches)
         self._autoSaveTables(os.path.splitext(self._classificationResultPath)[0], headers, rows)
 
@@ -929,7 +929,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.batchStatusLabel.setText(
             "Classified {} meshes. Select a row to inspect it.".format(len(self._bulkResults)))
         self.onLogMessage(
-            "\n\n\nBatch classification complete: {} meshes.\nSummary saved to {}".format(
+            "\n\n\nBatch classification complete: {} meshes.\n\nSummary saved to {}".format(
                 len(self._bulkResults), summaryPath), color="#4CAF50")
         headers, rows = self._batchTable(self._bulkResults)
         self._autoSaveTables(os.path.splitext(summaryPath)[0], headers, rows)
@@ -994,7 +994,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
     # ------------------------------------------------------------------ #
 
     def _noteExportDir(self, directory):
-        """Remember where the last files were written and enable 'Open Save Folder'."""
         self._lastExportDir = directory
         self.openSaveFolderButton.setEnabled(True)
         self.openSaveFolderButton.setText("Open Save Folder")
@@ -1008,8 +1007,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(directory))
 
     def _resultsDir(self):
-        """Best directory to drop exports into: next to the loaded latent files,
-        otherwise the model's classification output folder, otherwise cwd."""
         for path in (self._allLatentsPath, self._fossilLatentPath, self._top5IndicesPath):
             if path and os.path.dirname(path):
                 return os.path.dirname(path)
@@ -1020,9 +1017,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         return os.getcwd()
 
     def _writeTable(self, base, headers, rows):
-        """Write the same rows as both a CSV and an aligned plain-text file.
-        Returns (csvPath, txtPath)."""
-        import csv
         rows = [[("" if value is None else str(value)) for value in row] for row in rows]
         csvPath, txtPath = base + ".csv", base + ".txt"
         with open(csvPath, "w", newline="", encoding="utf-8") as stream:
@@ -1037,13 +1031,11 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         return csvPath, txtPath
 
     def _autoSaveTables(self, base, headers, rows):
-        """Write CSV+TXT automatically after a run, alongside the JSON. Never let
-        an export error abort the classification flow."""
         try:
             csvPath, txtPath = self._writeTable(base, headers, rows)
             self._noteExportDir(os.path.dirname(csvPath))
             self.onLogMessage(
-                "Also saved CSV/TXT:\n{}\n{}".format(csvPath, txtPath), color="#4CAF50")
+                "\n{}\n\n{}".format(csvPath, txtPath), color="#4CAF50")
         except Exception as error:
             self.onLogMessage("Could not auto-save CSV/TXT: {}".format(error), color="orange")
 
@@ -1121,8 +1113,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         }.get(plotType)
 
     def _plotGroups(self, coords):
-        """Split 2D coords into (background, top-5, fossil) groups with hover labels,
-        mirroring how _buildPlot colours the interactive Slicer chart."""
         fossilIdx = self._cachedFossilIdx
         top5Indices = self._cachedTop5Indices
         train_filenames = []
@@ -1154,9 +1144,14 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
 
     def _savePlotFiles(self, plotType, coords, outDir):
         groups = self._plotGroups(coords)
-        safe = plotType.replace("-", "").replace(" ", "")
-        pngPath = os.path.join(outDir, "classification_{}_plot.png".format(safe))
-        htmlPath = os.path.join(outDir, "classification_{}_plot.html".format(safe))
+        if self.inputFilePath:
+            meshBase = os.path.splitext(os.path.basename(self.inputFilePath))[0]
+        elif self._previousResultsBaseName:
+            meshBase = self._previousResultsBaseName
+        else:
+            meshBase = "fossil"
+        pngPath = os.path.join(outDir, "{}_classif_{}.png".format(meshBase, plotType))
+        htmlPath = os.path.join(outDir, "{}_classif_{}.html".format(meshBase, plotType))
         written = []
 
         bx, by, _ = groups["bg"]

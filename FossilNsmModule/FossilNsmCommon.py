@@ -38,7 +38,7 @@ class FossilNsmCommonWidget:
         inputLayout.addRow("", self.modelRootLabel)
         self.modelRootButton.connect("clicked(bool)", self.onSelectModelRoot)
 
-        self.modelChecklist = qt.QPlainTextEdit()
+        self.modelChecklist = qt.QTextEdit()
         self.modelChecklist.setReadOnly(True)
         self.modelChecklist.setFixedHeight(110)
         inputLayout.addRow("Model Validation:", self.modelChecklist)
@@ -206,7 +206,7 @@ class FossilNsmCommonWidget:
         slicer.mrmlScene.Clear(0)
         self.onAfterSceneCleared()
         self.updateRunButton()
-        self.onLogMessage("Scene cleared.", color="#4CAF50")
+        self.onLogMessage("\nScene cleared.\n")
 
     def onAfterSceneCleared(self):
         pass
@@ -279,7 +279,17 @@ class FossilNsmCommonWidget:
 
     def getViewNode(self, tag):
         return slicer.mrmlScene.GetSingletonNode(tag, "vtkMRMLViewNode")
-
+    
+    def setDefaultThreeDLayout(self):
+        layoutManager = slicer.app.layoutManager()
+        layoutManager.setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutOneUp3DView)
+        threeDWidget = layoutManager.threeDWidget(0)
+        viewNode = threeDWidget.mrmlViewNode()
+        viewNode.SetBackgroundColor(0, 0, 0)
+        viewNode.SetBackgroundColor2(0, 0, 0)
+        viewNode.SetBoxVisible(False)
+        viewNode.SetAxisLabelsVisible(False)
+        threeDWidget.threeDView().resetFocalPoint()
 
 class FossilNsmLogic(ScriptedLoadableModuleLogic):
     @staticmethod

@@ -1,10 +1,13 @@
 import os
 import qt
 import ctk
+import vtk
 import sys
 import slicer
 import subprocess
 from slicer.ScriptedLoadableModule import *
+import pyvista as pv
+from utils.utils import _uniform_surface_sample, chamfer_distance, f_score, ave_sym_surface_distance
 
 MODULE_DIR = os.path.dirname(__file__)
 if MODULE_DIR not in sys.path:
@@ -26,11 +29,8 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
 
     def setup(self):
         super().setup()
-
         self.initializeFossilNsmState()
-
         FossilNsmLogic.installDependenciesIfNeeded()
-
         self.addFossilNsmInputSection(self.layout)
 
         # Fast Mode Collapsible Layout (one-shot encoder instead of optimization)
@@ -147,7 +147,7 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
         self.layout.addWidget(self.progressBar)
 
         # Status Log
-        self.statusLog = qt.QPlainTextEdit()
+        self.statusLog = qt.QTextEdit()
         self.statusLog.setReadOnly(True)
         self.statusLog.setFixedHeight(120)
         self.layout.addWidget(self.statusLog)
@@ -200,11 +200,22 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
         self.recallValue = qt.QLabel("0.0")
         distanceLayout.addRow(self.recall, self.recallValue)
 
+        self._inputModelNode = None
+        self._outputModelNode = None
+        self._showingCompletedModel = True
+
+        self.toggleModelsButton = qt.QPushButton("Toggle Models")
+        self.toggleModelsButton.setEnabled(False)
+        self.toggleModelsButton.connect("clicked(bool)", self.onToggleModels)
+        self.layout.addWidget(self.toggleModelsButton)
+
         self.addRefreshSceneButton(self.layout)
-
         self.layout.addStretch(1)
-
         self.updateRunButton()
+
+    # Default view - 3D only, black bg, no labels
+    def enter(self):
+        self.setDefaultThreeDLayout()
 
     # Toggle Uncertainty Inputs
     def onToggleUncertaintyOptions(self, state=None):
@@ -235,6 +246,11 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
     def onAfterSceneCleared(self):
         self.outputPath = None
         self._resultPath = None
+        self._inputModelNode = None
+        self._outputModelNode = None
+        self._showingCompletedModel = True
+        self.toggleModelsButton.setEnabled(False)
+        self.toggleModelsButton.setText("Show Original Model")
         self.calculateDistsButton.setEnabled(False)
         self.chamferDistanceValue.setText("0.0")
         self.averageSymmetricSurfaceDistanceValue.setText("0.0")
@@ -242,12 +258,25 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
         self.precisionValue.setText("0.0")
         self.recallValue.setText("0.0")
         self.statusLog.clear()
+        self.setDefaultThreeDLayout()
 
     # Inference
     def onRunInference(self):
         self.runButton.setEnabled(False)
         self.progressBar.setVisible(True)
         self.onLogMessage("Starting inference...")
+
+        if self._inputModelNode and slicer.mrmlScene.IsNodePresent(self._inputModelNode):
+            slicer.mrmlScene.RemoveNode(self._inputModelNode)
+        if self._outputModelNode and slicer.mrmlScene.IsNodePresent(self._outputModelNode):
+            slicer.mrmlScene.RemoveNode(self._outputModelNode)
+            self._outputModelNode = None
+
+        self._inputModelNode = slicer.util.loadModel(self.inputFilePath)
+        self._inputModelNode.SetName("Original Input Mesh")
+        self._inputModelNode.CreateDefaultDisplayNodes()
+        self._inputModelNode.GetDisplayNode().SetColor(0.7, 0.7, 0.7)
+        self._inputModelNode.GetDisplayNode().SetVisibility(False)
 
         base = os.path.splitext(os.path.basename(self.inputFilePath))[0]
         self._resultPath = os.path.join(self.outputFolderPath, base + ".done")
@@ -310,10 +339,7 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
         self._pollTimer.start()
 
     # Chamfer, ASSD, F-Score, Precision, Recall
-    def onCalculateDistances(self):
-        import pyvista as pv
-        from utils.utils import _uniform_surface_sample, chamfer_distance, f_score, ave_sym_surface_distance
-        
+    def onCalculateDistances(self):       
         mp = pv.read(self.outputPath).triangulate().extract_geometry()
         gt = pv.read(self.inputFilePath).triangulate().extract_geometry()
         # Sample points across surface
@@ -330,30 +356,25 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
         self.recallValue.setText(f"{recall:.6f}")
 
     def applyUncertaintyVisualization(self, modelNode):
-        import vtk
-
         polyData = modelNode.GetPolyData()
         if not polyData:
             self.onLogMessage("No polydata found on output model.")
-            return
-
+            return False
         pointData = polyData.GetPointData()
         if not pointData:
             self.onLogMessage("No point data found on output model.")
-            return
+            return False
 
         # Prefer micro-unit scalar for readable legend.
         scalarName = "SdfUncertainty_um"
         scalarArray = pointData.GetArray(scalarName)
-
         # Fallback to raw scalar if old output files do not contain the _um field.
         if scalarArray is None:
             scalarName = "SdfUncertainty"
             scalarArray = pointData.GetArray(scalarName)
-
         if scalarArray is None:
-            self.onLogMessage("No SdfUncertainty scalar field found.")
-            return
+            self.onLogMessage("\nNo SdfUncertainty scalar field found.")
+            return False
 
         self.onLogMessage(f"Applying uncertainty visualization using {scalarName}.")
 
@@ -361,10 +382,9 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
         if not displayNode:
             modelNode.CreateDefaultDisplayNodes()
             displayNode = modelNode.GetDisplayNode()
-
         if not displayNode:
             self.onLogMessage("Could not create display node.")
-            return
+            return False
 
         # Activate point scalar data
         try:
@@ -378,9 +398,6 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
 
         # Use manual scalar range so colorbar is stable and meaningful
         scalarRange = scalarArray.GetRange()
-
-        # Optional: for cleaner visualization, use percentiles instead of full min/max.
-        # For exact notebook-like auto range, keep scalarRange as above.
         displayNode.SetScalarRangeFlag(slicer.vtkMRMLDisplayNode.UseManualScalarRange)
         displayNode.SetScalarRange(scalarRange[0], scalarRange[1])
 
@@ -390,16 +407,14 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
             if "viridis" in node.GetName().lower():
                 colorNode = node
                 break
-
         if colorNode:
             displayNode.SetAndObserveColorNodeID(colorNode.GetID())
         else:
             self.onLogMessage("Viridis color map not found. Using default scalar color map.")
 
+        # Add color legend / colorbar
         displayNode.SetOpacity(1.0)
         displayNode.Modified()
-
-        # Add color legend / colorbar
         try:
             colorLegendDisplayNode = slicer.modules.colors.logic().AddDefaultColorLegendDisplayNode(modelNode)
             if colorLegendDisplayNode:
@@ -411,10 +426,29 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
                 else:
                     colorLegendDisplayNode.SetTitleText("SDF uncertainty")
                     colorLegendDisplayNode.SetLabelFormat("%.2e")
-
                 colorLegendDisplayNode.Modified()
         except Exception as e:
             self.onLogMessage(f"Could not show color legend: {str(e)}")
+        
+        return True
+    
+    def onToggleModels(self):
+        if not self._inputModelNode or not self._outputModelNode:
+            return
+        inputDisplay = self._inputModelNode.GetDisplayNode()
+        outputDisplay = self._outputModelNode.GetDisplayNode()
+        if not inputDisplay or not outputDisplay:
+            return
+
+        self._showingCompletedModel = not self._showingCompletedModel
+        if self._showingCompletedModel:
+            inputDisplay.SetVisibility(False)
+            outputDisplay.SetVisibility(True)
+            self.toggleModelsButton.setText("Show Original Model")
+        else:
+            inputDisplay.SetVisibility(True)
+            outputDisplay.SetVisibility(False)
+            self.toggleModelsButton.setText("Show Shape Completed Model")
 
     def _pollSubprocess(self):
         # Read any new lines from the log file (never blocks)
@@ -441,22 +475,33 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
             if retcode == 0 and os.path.exists(self._resultPath):
                 with open(self._resultPath) as f:
                     self.outputPath = f.read().strip()
-                self.onLogMessage(f"Inference complete: {self.outputPath}")
+                self.onLogMessage(f"\nInference complete. \n\nOutput saved to: {self.outputPath}", color = "#4CAF50")
                 outputNode = slicer.util.loadModel(self.outputPath)
                 outputNode.SetName("Predicted Mesh")
+                outputNode.CreateDefaultDisplayNodes()
+                self._outputModelNode = outputNode
+                displayNode = outputNode.GetDisplayNode()
 
-                # Configure visualization if uncertainty scalars are present
-                self.applyUncertaintyVisualization(outputNode)
+                appliedUncertainty = self.applyUncertaintyVisualization(outputNode)
+                if not appliedUncertainty:
+                    displayNode.SetScalarVisibility(False)
+                    displayNode.SetColor(0.9, 0.6, 0.2)
+                    displayNode.SetAmbient(0.3)
+                    displayNode.SetDiffuse(0.8)
+                    displayNode.SetSpecular(0.0)
+                
+                if self._inputModelNode and self._inputModelNode.GetDisplayNode():
+                    self._inputModelNode.GetDisplayNode().SetVisibility(False)
+                if self._outputModelNode and self._outputModelNode.GetDisplayNode():
+                    self._outputModelNode.GetDisplayNode().SetVisibility(True)
+                self._showingCompletedModel = True
+                self.toggleModelsButton.setEnabled(True)
+                self.toggleModelsButton.setText("Show Original Model")
 
                 slicer.app.layoutManager().threeDWidget(0).threeDView().resetFocalPoint()
                 self.calculateDistsButton.setEnabled(True)
             else:
                 self.onLogMessage(f"Inference failed (exit code {retcode}, file exists: {os.path.exists(self._resultPath)} at {self._resultPath})")
-
-
-    def onLogMessage(self, message):
-        self.statusLog.appendPlainText(str(message))
-
 
 class ShapeCompletionLogic(FossilNsmLogic):
     pass
