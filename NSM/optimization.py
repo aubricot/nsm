@@ -17,7 +17,8 @@ def pca_initialize_latent(mean_latent, latent_codes, top_k=10):
     # Convert to numpy
     latent_np = latent_codes.detach().cpu().numpy()
     mean_np = mean_latent.detach().cpu().numpy().squeeze()
-    pca = PCA(n_components=latent_np.shape[1])
+    k_cap = min(latent_np.shape[0], latent_np.shape[1])
+    pca = PCA(n_components=k_cap)
     pca.fit(latent_np)
     # Sample along top-K PCs
     top_components = pca.components_[:top_k]  # (K, D)
@@ -26,7 +27,7 @@ def pca_initialize_latent(mean_latent, latent_codes, top_k=10):
     coeffs = np.random.randn(top_k) * np.sqrt(top_eigenvalues) * scale
     pca_offset = np.dot(coeffs, top_components)  # D
     init_latent = mean_np + pca_offset
-    return torch.tensor(init_latent, dtype=torch.float32, device=latent_codes.device).unsqueeze(0)
+    return torch.tensor(init_latent, dtype=torch.float32, device=latent_codes.device).unsqueeze(0) 
 
 # Get top k PCA's based on defined explained variance threshold
 def get_top_k_pcs(latent_codes, threshold=0.90):
