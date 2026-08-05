@@ -1,5 +1,5 @@
 # Fossil NSM Module in 3D Slicer
-*Last edited 4 May 2026*
+*Last edited 5 Aug 2026*
 
 # Introduction
 Use Fossil NSM Module in [3D Slicer](https://www.slicer.org/) to do shape completion on a fossil lizard vertebra using our trained model. 
@@ -38,6 +38,7 @@ of pretending that a checkpoint contains its reference geometry.
 
 ![Fossil NSM Module](https://github.com/aubricot/nsm/blob/main/images/fossilnsmmodule.png)
 *Screenshot of shape completion results produced using Fossil NSM Module in 3D Slicer*
+See detailed steps for how to preprocess your fossil for inference on our [project wiki page](https://github.com/3D-fossils-Haag/nsm/wiki/Fossil-Preprocessing).  
 
 # Data Preprocessing
 **A) Smoothing**    
