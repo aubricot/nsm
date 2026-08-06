@@ -586,6 +586,7 @@ class ClassificationWidget(FossilNsmHuggingFaceAuthMixin, FossilNsmCommonWidget,
             self._loadMeshesIntoViewers()
             self._linkMeshViewers()
             self._styleViewers()
+            self._resetMeshViews()
 
         elif index == 2:  # Explore Plots
             self._applyPlotLayout()
@@ -880,6 +881,7 @@ class ClassificationWidget(FossilNsmHuggingFaceAuthMixin, FossilNsmCommonWidget,
         if self.inputFilePath and os.path.isfile(self.inputFilePath):
             fossilNode = slicer.util.loadModel(self.inputFilePath)
             fossilNode.SetName("Input Fossil")
+            self._normalizeForDisplay(fossilNode)
             fossilNode.CreateDefaultDisplayNodes()
             fossilNode.GetDisplayNode().SetColor(0.9, 0.6, 0.2)
             fossilNode.GetDisplayNode().SetAmbient(0.3)
@@ -891,11 +893,14 @@ class ClassificationWidget(FossilNsmHuggingFaceAuthMixin, FossilNsmCommonWidget,
 
         for match in self.classificationMatches[:5]:
             tag = "Match{}".format(match["rank"])
-            meshPath = self._referencePath(match)
-            if not meshPath:
+            res = self._resolveMatch(match)
+            if res.kind != "path":
+                self.onLogMessage(res.reason, color="red")
                 continue
+            meshPath = res.value
             node = slicer.util.loadModel(meshPath)
             node.SetName("Match {} - {}".format(match["rank"], match["mesh_name"]))
+            self._normalizeForDisplay(node)
             node.CreateDefaultDisplayNodes()
             node.GetDisplayNode().SetColor(0.2, 0.65, 0.9)
             node.GetDisplayNode().SetAmbient(0.3)
@@ -912,6 +917,37 @@ class ClassificationWidget(FossilNsmHuggingFaceAuthMixin, FossilNsmCommonWidget,
         viewNode = slicer.mrmlScene.GetSingletonNode(viewTag, "vtkMRMLViewNode")
         if viewNode:
             displayNode.AddViewNodeID(viewNode.GetID())
+
+    def _normalizeForDisplay(self, modelNode):
+        # Display only: center each mesh at the origin and scale to a common size so
+        # the comparison panels line up. Does not touch the SDF pipeline or results.
+        poly = modelNode.GetPolyData()
+        if not poly or poly.GetNumberOfPoints() == 0:
+            return
+        bounds = [0.0] * 6
+        poly.GetBounds(bounds)
+        cx = (bounds[0] + bounds[1]) / 2.0
+        cy = (bounds[2] + bounds[3]) / 2.0
+        cz = (bounds[4] + bounds[5]) / 2.0
+        radius = max(bounds[1] - bounds[0], bounds[3] - bounds[2], bounds[5] - bounds[4]) / 2.0
+        if radius <= 0:
+            return
+        transform = vtk.vtkTransform()
+        transform.PostMultiply()
+        transform.Translate(-cx, -cy, -cz)
+        transform.Scale(1.0 / radius, 1.0 / radius, 1.0 / radius)
+        filt = vtk.vtkTransformPolyDataFilter()
+        filt.SetInputData(poly)
+        filt.SetTransform(transform)
+        filt.Update()
+        modelNode.SetAndObservePolyData(filt.GetOutput())
+
+    def _resetMeshViews(self):
+        layoutManager = slicer.app.layoutManager()
+        for i in range(layoutManager.threeDViewCount):
+            view = layoutManager.threeDWidget(i).threeDView()
+            view.resetFocalPoint()
+            view.resetCamera()
 
     def _linkMeshViewers(self):
         tags = ["FossilInput", "Match1", "Match2", "Match3", "Match4", "Match5"]
