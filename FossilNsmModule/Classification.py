@@ -20,7 +20,12 @@ FOSSIL_NSM_PLOT_LAYOUT_ID = 703
 MODULE_DIR = os.path.dirname(__file__)
 if MODULE_DIR not in sys.path:
     sys.path.append(MODULE_DIR)
-from FossilNsmCommon import FossilNsmCommonWidget, FossilNsmLogic
+from FossilNsmCommon import FossilNsmCommonWidget, FossilNsmLogic, FossilNsmHuggingFaceAuthMixin
+
+UTILS_DIR = os.path.join(MODULE_DIR, "utils")
+if UTILS_DIR not in sys.path:
+    sys.path.append(UTILS_DIR)
+from reference_library import LocalFolderBackend, HuggingFaceBackend, Resolution, STATE_MISSING
 
 
 class Classification(ScriptedLoadableModule):
@@ -32,11 +37,14 @@ class Classification(ScriptedLoadableModule):
         self.parent.helpText = "Classify an input fossil mesh by ranking the nearest latent-space meshes."
 
 
-class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
+class ClassificationWidget(FossilNsmHuggingFaceAuthMixin, FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
     def setup(self):
         super().setup()
         self.initializeFossilNsmState()
         self.referenceMeshDirectory = None
+        self.initializeHuggingFaceState()
+        self._referenceSource = "local"
+        self._referenceBackend = self._makeBackend()
         self.classificationMatches = []
         self._classificationNodes = []
         self._plotsRenderedFor = None
@@ -101,12 +109,37 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         inferenceLayout.addWidget(inferenceBottomCollapsible)
         inferenceBottomLayout = qt.QFormLayout(inferenceBottomCollapsible)
 
+        # Reference source selector
+        self.referenceSourceCombo = qt.QComboBox()
+        self.referenceSourceCombo.addItems(["Local folder", "HuggingFace (gated)"])
+        self.referenceSourceCombo.connect("currentIndexChanged(int)", self.onReferenceSourceChanged)
+        inferenceBottomLayout.addRow("Reference Source:", self.referenceSourceCombo)
+
+        # Local folder controls
         self.referenceMeshesButton = qt.QPushButton("Select Reference Mesh Library...")
         self.referenceMeshesButton.connect("clicked(bool)", self.onSelectReferenceMeshDirectory)
         self.referenceMeshesLabel = qt.QLabel("Optional: needed to visualize returned meshes")
         self.referenceMeshesLabel.setWordWrap(True)
         inferenceBottomLayout.addRow("Reference Mesh Library:", self.referenceMeshesButton)
         inferenceBottomLayout.addRow("", self.referenceMeshesLabel)
+
+        # HuggingFace controls
+        self.hfControls = qt.QWidget()
+        hfControlsLayout = qt.QVBoxLayout(self.hfControls)
+        hfControlsLayout.setContentsMargins(0, 0, 0, 0)
+        self.addHuggingFaceTokenSection(hfControlsLayout)
+        self.hfTokenChecklist = qt.QPlainTextEdit()
+        self.hfTokenChecklist.setReadOnly(True)
+        self.hfTokenChecklist.setFixedHeight(70)
+        hfControlsLayout.addWidget(self.hfTokenChecklist)
+        self.prefetchButton = qt.QPushButton("Prefetch entire library (175 MB)")
+        self.prefetchButton.connect("clicked(bool)", self.onPrefetchLibrary)
+        hfControlsLayout.addWidget(self.prefetchButton)
+        hfNote = qt.QLabel("Compressed for download and slightly lossy. Use the source .vtk for precise measurements.")
+        hfNote.setWordWrap(True)
+        hfControlsLayout.addWidget(hfNote)
+        self.hfControls.setVisible(False)
+        inferenceBottomLayout.addRow(self.hfControls)
 
         self.classificationIterationsInput = qt.QLineEdit("1000")
         inferenceBottomLayout.addRow("Latent Optimization Iterations:", self.classificationIterationsInput)
@@ -309,6 +342,49 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             return
         self.referenceMeshDirectory = path
         self.referenceMeshesLabel.setText(path)
+        self._referenceBackend = self._makeBackend()
+        self._updateClassificationTable()
+
+    def _makeBackend(self):
+        if self._referenceSource == "huggingface":
+            return HuggingFaceBackend(
+                repo_id=self.hfRepoId, revision=self.hfRevision,
+                token_provider=self.resolveHuggingFaceToken)
+        return LocalFolderBackend(self.referenceMeshDirectory)
+
+    def onHuggingFaceRepoConfigChanged(self):
+        self._referenceBackend = self._makeBackend()
+        self._updateClassificationTable()
+
+    def onReferenceSourceChanged(self, index):
+        self._referenceSource = "huggingface" if index == 1 else "local"
+        isHf = self._referenceSource == "huggingface"
+        self.referenceMeshesButton.setVisible(not isHf)
+        self.referenceMeshesLabel.setVisible(not isHf)
+        self.hfControls.setVisible(isHf)
+        if isHf:
+            self.updateHuggingFaceChecklistUI()
+        self._referenceBackend = self._makeBackend()
+        self._updateClassificationTable()
+
+    def onPrefetchLibrary(self):
+        try:
+            token = self.resolveHuggingFaceToken()
+        except ValueError as e:
+            self.onLogMessage(str(e), color="red")
+            return
+        self.onLogMessage("\n\n\nPrefetching reference library (175 MB)...", color="#4CAF50")
+        slicer.app.processEvents()
+        try:
+            from huggingface_hub import snapshot_download
+            snapshot_download(
+                HuggingFaceBackend().repo_id, repo_type="dataset",
+                revision=HuggingFaceBackend().revision, token=token,
+                allow_patterns=["*.glb"])
+        except Exception as e:
+            self.onLogMessage("Prefetch failed: check your network. " + str(e), color="red")
+            return
+        self.onLogMessage("\n\n\nPrefetch complete. Meshes now render with no network.", color="#4CAF50")
         self._updateClassificationTable()
 
     def onLoadShapeCompletionResult(self):
@@ -964,30 +1040,35 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self._updateClassificationTable()
         self.onLogMessage("Loaded batch result: " + result.get("input_name", ""), color="#4CAF50")
 
+    def _resolveMatch(self, match):
+        # Never let a backend exception escape a Qt slot and abort the viewer/table loop.
+        meshName = match.get("mesh_name", "")
+        try:
+            return self._referenceBackend.resolve(meshName)
+        except Exception as e:
+            return Resolution("missing", None, "Could not resolve {}: {}".format(meshName, e), STATE_MISSING)
+
     def _referencePath(self, match):
-        if not self.referenceMeshDirectory:
-            return None
-        name = match.get("mesh_name", "")
-        direct = os.path.join(self.referenceMeshDirectory, name)
-        if os.path.isfile(direct):
-            return direct
-        found = glob.glob(os.path.join(self.referenceMeshDirectory, "**", name), recursive=True)
-        return found[0] if found else None
+        res = self._resolveMatch(match)
+        return res.value if res.kind == "path" else None
+
+    def _availability(self, match):
+        try:
+            return self._referenceBackend.availability(match.get("mesh_name", ""))
+        except Exception:
+            return STATE_MISSING
 
     def _updateClassificationTable(self):
         self.classificationTable.setRowCount(len(self.classificationMatches))
-        available = 0
         for row, match in enumerate(self.classificationMatches):
-            meshPath = self._referencePath(match)
+            state = self._availability(match)
             values = [
                 match["mesh_name"],
                 "{:.6f}".format(match["cosine_distance"]),
-                "Yes" if meshPath else "No - select matching library",
+                state,
             ]
             for column, value in enumerate(values):
                 self.classificationTable.setItem(row, column, qt.QTableWidgetItem(value))
-            if meshPath:
-                available += 1
 
     # ------------------------------------------------------------------ #
     #  Saving / exporting results (CSV, TXT, PNG, HTML)
@@ -1270,6 +1351,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             if node and slicer.mrmlScene.IsNodePresent(node):
                 slicer.mrmlScene.RemoveNode(node)
         self._classificationNodes = []
+
 
 class ClassificationLogic(FossilNsmLogic):
     pass
