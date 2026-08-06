@@ -363,3 +363,13 @@ class FossilNsmLogic(ScriptedLoadableModuleLogic):
             import vtk
         except ImportError:
             slicer.util.pip_install("vtk")
+
+        try:
+            import huggingface_hub
+        except ImportError:
+            slicer.util.pip_install("huggingface_hub")
+
+        try:
+            import DracoPy
+        except ImportError:
+            slicer.util.pip_install("DracoPy")
