@@ -8,7 +8,8 @@ _IDENTITY_MATRIX = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
 
 def _parse_glb(path):
     # Return (gltf_json, binary_chunk); handles BIN-chunk and data-URI buffers.
-    data = open(path, "rb").read()
+    with open(path, "rb") as handle:
+        data = handle.read()
     magic, version, _ = struct.unpack("<4sII", data[:12])
     if magic != b"glTF" or version != 2:
         raise ValueError("not a glTF 2.0 binary file: {}".format(path))
@@ -55,7 +56,7 @@ def glb_to_polydata(path):
     try:
         import DracoPy
     except ImportError:
-        raise ImportError("DracoPy is required to decode Draco .glb meshes. pip_install('DracoPy').")
+        raise ImportError("DracoPy is required to decode Draco .glb meshes. Install it with: pip install DracoPy")
 
     gltf, binary = _parse_glb(path)
     if not gltf:

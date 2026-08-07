@@ -417,14 +417,8 @@ class FossilNsmHuggingFaceAuthMixin:
         return anyOk
 
     def readTokenFile(self, path):
-        if not path or not os.path.isfile(path):
-            return None
-        try:
-            with open(path, "r") as handle:
-                token = handle.read().strip()
-        except OSError:
-            return None
-        return token or None
+        from reference_library import read_token_file
+        return read_token_file(path)
 
     def detectCachedToken(self):
         # huggingface_hub already resolves env + the OS cache location, so use it

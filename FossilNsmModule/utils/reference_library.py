@@ -35,7 +35,7 @@ CATEGORY_DECODE = "decode"
 def compute_lookup_key(mesh_name):
     # Same derivation used to build the manifest. Idempotent: key(key(x)) == key(x).
     key = os.path.basename(mesh_name).lower()
-    for ext in (".vtk", ".glb", ".ply"):
+    for ext in (".vtk", ".vtp", ".glb", ".ply", ".stl", ".obj"):
         if key.endswith(ext):
             key = key[:-len(ext)]
     key = re.sub(r"[^a-z0-9]+", "_", key).strip("_")
@@ -386,10 +386,3 @@ class HuggingFaceBackend(ReferenceMeshBackend):
 
         self._temp_cache[mesh_name] = out_path
         return Resolution("path", out_path, state=STATE_CACHED)
-
-
-def select_backend(source, local_root=None, token_provider=None, manifest=None):
-    # source: "local" | "huggingface"
-    if source == "huggingface":
-        return HuggingFaceBackend(token_provider=token_provider, manifest=manifest)
-    return LocalFolderBackend(local_root)

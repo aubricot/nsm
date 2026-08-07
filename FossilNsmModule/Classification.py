@@ -368,18 +368,21 @@ class ClassificationWidget(FossilNsmHuggingFaceAuthMixin, FossilNsmCommonWidget,
         self._updateClassificationTable()
 
     def onPrefetchLibrary(self):
+        if not self.hfRepoId:
+            self.onLogMessage("Enter a HuggingFace dataset repo first.", color="red")
+            return
         try:
             token = self.resolveHuggingFaceToken()
         except ValueError as e:
             self.onLogMessage(str(e), color="red")
             return
-        self.onLogMessage("\n\n\nPrefetching reference library (175 MB)...", color="#4CAF50")
+        self.onLogMessage("\n\n\nPrefetching reference library...", color="#4CAF50")
         slicer.app.processEvents()
         try:
             from huggingface_hub import snapshot_download
             snapshot_download(
-                HuggingFaceBackend().repo_id, repo_type="dataset",
-                revision=HuggingFaceBackend().revision, token=token,
+                self.hfRepoId, repo_type="dataset",
+                revision=self.hfRevision, token=token,
                 allow_patterns=["*.glb"])
         except Exception as e:
             self.onLogMessage("Prefetch failed: check your network. " + str(e), color="red")
