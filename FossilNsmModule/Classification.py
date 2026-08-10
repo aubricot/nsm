@@ -1,3 +1,6 @@
+import slicer
+from FossilNsmCommon import FossilNsmCommonWidget, FossilNsmLogic
+FossilNsmLogic.installDependenciesIfNeeded()
 import glob
 import json
 import os
@@ -12,7 +15,6 @@ from sklearn.manifold import TSNE
 import umap
 import ctk
 import qt
-import slicer
 from slicer.ScriptedLoadableModule import *
 
 FOSSIL_NSM_MESH_LAYOUT_ID = 702
@@ -20,8 +22,6 @@ FOSSIL_NSM_PLOT_LAYOUT_ID = 703
 MODULE_DIR = os.path.dirname(__file__)
 if MODULE_DIR not in sys.path:
     sys.path.append(MODULE_DIR)
-from FossilNsmCommon import FossilNsmCommonWidget, FossilNsmLogic
-
 
 class Classification(ScriptedLoadableModule):
     def __init__(self, parent):
@@ -30,7 +30,6 @@ class Classification(ScriptedLoadableModule):
         self.parent.categories = ["FossilNSM"]
         self.parent.contributors = ["Wolcott et all"]
         self.parent.helpText = "Classify an input fossil mesh by ranking the nearest latent-space meshes."
-
 
 class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
     def setup(self):
