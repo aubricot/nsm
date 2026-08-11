@@ -1,12 +1,16 @@
 # Utility functions for fine-tuning optimization of novel meshes in trained models
 
-from sklearn.decomposition import PCA
-import torch.nn.functional as F
 import numpy as np
-import torch
-from NSM.helper_funcs import get_sdfs  
-import pyvista as pv
 import json
+from sklearn.decomposition import PCA
+
+import torch.nn.functional as F
+import torch
+from NSM.helper_funcs import get_sdfs, NumpyTransform  
+from NSM.datasets import SDFSamples
+from NSM.mesh import create_mesh
+
+import pyvista as pv
 try:
     import open3d as o3d
 except:
@@ -17,8 +21,7 @@ def pca_initialize_latent(mean_latent, latent_codes, top_k=10):
     # Convert to numpy
     latent_np = latent_codes.detach().cpu().numpy()
     mean_np = mean_latent.detach().cpu().numpy().squeeze()
-    k_cap = min(latent_np.shape[0], latent_np.shape[1])
-    pca = PCA(n_components=k_cap)
+    pca = PCA(n_components=latent_np.shape[1])
     pca.fit(latent_np)
     # Sample along top-K PCs
     top_components = pca.components_[:top_k]  # (K, D)
@@ -27,7 +30,7 @@ def pca_initialize_latent(mean_latent, latent_codes, top_k=10):
     coeffs = np.random.randn(top_k) * np.sqrt(top_eigenvalues) * scale
     pca_offset = np.dot(coeffs, top_components)  # D
     init_latent = mean_np + pca_offset
-    return torch.tensor(init_latent, dtype=torch.float32, device=latent_codes.device).unsqueeze(0) 
+    return torch.tensor(init_latent, dtype=torch.float32, device=latent_codes.device).unsqueeze(0)
 
 # Get top k PCA's based on defined explained variance threshold
 def get_top_k_pcs(latent_codes, threshold=0.90):
@@ -35,11 +38,9 @@ def get_top_k_pcs(latent_codes, threshold=0.90):
     pca = PCA()
     pca.fit(latent_np)
     cum_var = np.cumsum(pca.explained_variance_ratio_)
-    k = np.searchsorted(cum_var, threshold) + 1
-    k_cap = min(latent_np.shape[0], latent_np.shape[1])
-    k = min(k, k_cap)
-    print(f"Selected top {k} PCs (cap={k_cap}) to explain ≥ {threshold*100:.1f}% of variance")
-    return pca, k
+    k = np.searchsorted(cum_var, threshold)
+    print(f"Selected top {k+1} PCs to explain {threshold*100:.1f}% of variance")
+    return pca, k + 1
 
 # Find the top 5 most similar meshes from training data to novel/input mesh - uses L2 (euclidian) distance in latent space
 def find_similar(latent_novel, latent_codes, top_k=5, n_std=2):
@@ -144,7 +145,10 @@ def downsample_partial_pointcloud(mesh_path, n_points=5000, voxel_fraction=0.01,
     # Read mesh with PyVista
     mesh_pv = pv.read(mesh_path)
     if not mesh_pv.is_all_triangles:
-        mesh_pv = mesh_pv.triangulate()
+        mesh_pv = mesh_pv.clean().triangulate()
+        for arr in ['RegionId', 'vtkOriginalCellIds']:
+            if arr in mesh_pv.cell_data.keys():
+                mesh_pv.cell_data.remove(arr)
     # Smooth mesh to denoise
     mesh_pv = mesh_pv.smooth(n_iter=50, relaxation_factor=0.01)
     # Convert to Open3D mesh
@@ -266,7 +270,10 @@ def sample_points_in_bbox(mesh_path, bbox_params, n_points=500, method='poisson'
     # Read mesh with PyVista
     mesh_pv = pv.read(mesh_path)
     if not mesh_pv.is_all_triangles:
-        mesh_pv = mesh_pv.triangulate()
+        mesh_pv = mesh_pv.clean().triangulate()
+        for arr in ['RegionId', 'vtkOriginalCellIds']:
+            if arr in mesh_pv.cell_data.keys():
+                mesh_pv.cell_data.remove(arr)
     # Smooth mesh to denoise
     mesh_pv = mesh_pv.smooth(n_iter=50, relaxation_factor=0.01)
     # Convert to Open3D mesh
@@ -325,8 +332,12 @@ def get_norm_params(sdf_dataset, sample_dict, vert_fname):
 
 # Normalize mesh
 def normalize_mesh(mesh_out, vert_fname, config, center, max_radius):
-    # Manually normalize
-    mesh_pv = pv.wrap(mesh_out)
+    # Ensure pyvista
+    if not isinstance(mesh_out, pv.PolyData):
+        mesh_pv = mesh_out.extract_surface(algorithm=None)
+    else:
+        mesh_pv = mesh_out
+    # Normalize
     if config['normalize_pts'] == True:
         print("Normalizing output mesh to match training transforms...")
         mesh_pv.points = mesh_pv.points * max_radius + center
@@ -334,11 +345,87 @@ def normalize_mesh(mesh_out, vert_fname, config, center, max_radius):
     # Compare to input mesh
     input_mesh = pv.read(vert_fname)
     print(f"Input mesh bounds: {input_mesh.bounds}")
-    # Ensure it's PyVista PolyData
-    if isinstance(mesh_out, list):
-        mesh_out = mesh_out[0]
-    if not isinstance(mesh_out, pv.PolyData):
-        mesh_pv = mesh_out.extract_geometry()
-    else:
-        mesh_pv = mesh_out 
     return mesh_pv
+
+# Build SDF dataset from input mesh using n_samples
+def build_sdf_dataset(mesh_fpath, config, n_samples=240, device='cuda'):
+    # Setup your dataset with just one mesh
+    sdf_dataset = SDFSamples(
+        list_mesh_paths=[mesh_fpath],
+        multiprocessing=False,
+        subsample=config["samples_per_object_per_batch"],
+        print_filename=True,
+        n_pts=config["n_pts_per_object"],
+        p_near_surface=config['percent_near_surface'],
+        p_further_from_surface=config['percent_further_from_surface'],
+        sigma_near=config['sigma_near'],
+        sigma_far=config['sigma_far'],
+        rand_function=config['random_function'], 
+        center_pts=config['center_pts'],
+        norm_pts=config['normalize_pts'],
+        scale_method=config['scale_method'],
+        scale_jointly=config['scale_jointly'],
+        reference_mesh=None,
+        verbose=config['verbose'],
+        save_cache=config['cache'],
+        equal_pos_neg=config['equal_pos_neg'],
+        fix_mesh=config['fix_mesh'])
+
+    # Get the point/SDF data
+    print("\n-----Setting up dataset-----\n")
+    sample_dict, _ = sdf_dataset[0]
+    points = sample_dict['xyz'].to(device) # shape: [N, 3]
+    sdf_vals = sample_dict['gt_sdf'].to(device).reshape(-1, 1)  # shape: [N, 1]
+
+    # Use a subset of the points for optizimation/reconstruction
+    indices = torch.randperm(points.size(0))[:n_samples] # Generate n_samples random indices
+
+    # Downsample the points and SDF values
+    points = points[indices]
+    points = points.squeeze()
+    sdf_vals = sdf_vals[indices]
+    sdf_vals = sdf_vals.reshape(-1, 1)
+    return points, sdf_vals, sdf_dataset, sample_dict
+
+# Encode a latent using 2-phase optimization (NSM is autodecoder)
+def encode_latent(decoder, points, sdf_vals, latent_dim, mean_latent, latent_codes, top_k_reg, latent_std,
+                  iters1=3000, iters2=8000, lr1=1e-4, lr2=1e-5, 
+                  lambda_reg1=1e-3, lambda_reg2=1e-5, clamp_val1=1.0, clamp_val2=0,
+                  scheduler_step1=800, scheduler_step2=800, scheduler_gamma1=0.9, scheduler_gamma2=0.7,
+                  batch_inference_size=32768, device='cuda'):
+    # Optimize latents
+    print("\n-----Optimizing latents----\n")
+    # Phase 1 - Coarse Optimization - get a global shape in the right area of latent space (close to target specimen (far enough from mean); but not so far from mean that it is noisy or unrealistic)
+    latent_opt1, _ = optimize_latent_partial(decoder=decoder, partial_pts=points.squeeze(), sdfs=sdf_vals, latent_dim=latent_dim, mean_latent=mean_latent, 
+                                             latent_init=latent_codes, top_k=top_k_reg, latent_std=latent_std, iters=iters1, lr=lr1, lambda_reg=lambda_reg1, 
+                                             clamp_val=clamp_val1, scheduler_step=scheduler_step1, scheduler_gamma=scheduler_gamma1, 
+                                             batch_inference_size=batch_inference_size, multi_stage=False, device=device)
+
+    # Phase 2 - Refinement - emphasis on local SDF samples and surface consistency to refine target specimen shape
+    latent_opt2, _ = optimize_latent_partial(decoder=decoder, partial_pts=points.squeeze(), sdfs=sdf_vals, latent_dim=latent_dim, mean_latent=mean_latent, 
+                                             latent_init=latent_opt1, top_k=top_k_reg, latent_std=latent_std, iters=iters2, lr=lr2, lambda_reg=lambda_reg2, 
+                                             clamp_val=clamp_val2, scheduler_step=scheduler_step2, scheduler_gamma=scheduler_gamma2, 
+                                             batch_inference_size=batch_inference_size, multi_stage=True, device=device)
+    print("\nTranslated novel mesh into latent space!\n")
+    return latent_opt2
+
+# Reconstruct a mesh from a latent
+def reconstruct_mesh_from_latent(mesh_fpath, model, latent_vec, config, device='cuda'):
+    # Reconstruction parameters
+    recon_grid_origin = 1.0
+    n_pts_per_axis = config.get('gridN',256) 
+    voxel_origin = (-recon_grid_origin, -recon_grid_origin, -recon_grid_origin)
+    voxel_size = (recon_grid_origin * 2) / (n_pts_per_axis - 1)
+    offset = np.array([0.0, 0.0, 0.0])
+    scale = 1.0
+    icp_transform = NumpyTransform(np.eye(4))
+    objects = 1
+
+    # Reconstruct the novel mesh
+    with torch.no_grad():
+        mesh_out = create_mesh(decoder=model, latent_vector=latent_vec, n_pts_per_axis=n_pts_per_axis,
+                                voxel_origin=voxel_origin, voxel_size=voxel_size, path_original_mesh=mesh_fpath,
+                                offset=offset, scale=scale, icp_transform=icp_transform, objects=objects,
+                                verbose=True, device=device, scale_to_original_mesh=False) 
+        
+    return mesh_out

@@ -87,14 +87,14 @@ for i, vert_fname in enumerate(mesh_list):
 
     # Get the point/SDF data
     print("\n-----Setting up dataset-----\n")
-    sdf_sample = sdf_dataset[0]  # returns a dict
-    sample_dict, _ = sdf_sample
+    sample_dict, _ = sdf_dataset[0]
     points = sample_dict['xyz'].to(device) # shape: [N, 3]
     sdf_vals = sample_dict['gt_sdf'].to(device)  # shape: [N, 1]
 
     # Use a subset of the points for optizimation/reconstruction
     n_samples = 240 # TO DO: Define how many points to sample
     indices = torch.randperm(points.size(0))[:n_samples] # Generate n_samples random indices
+    
     # Downsample the points and SDF values
     points = points[indices]
     points = points.squeeze()
@@ -135,8 +135,10 @@ for i, vert_fname in enumerate(mesh_list):
     mesh_pv = normalize_mesh(mesh_out, vert_fname, config, center, max_radius)
 
     # Save mesh
-    mesh_pv = mesh_pv.clean()
-    mesh_pv = mesh_pv.triangulate()
+    mesh_pv = mesh_pv.clean().triangulate()
+    for arr in ['RegionId', 'vtkOriginalCellIds']:
+        if arr in mesh_pv.cell_data.keys():
+            mesh_pv.cell_data.remove(arr)
     output_path = outfpath + "/" + os.path.splitext(os.path.basename(vert_fname))[0] + "_shape_completion.vtk"
     # Set color: RGB in range 0–255 or 0–1
     color = np.array([112, 215, 222], dtype=np.uint8)  

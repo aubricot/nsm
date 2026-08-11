@@ -1,9 +1,11 @@
+import slicer
+from FossilNsmCommon import FossilNsmCommonWidget, FossilNsmLogic
+FossilNsmLogic.installDependenciesIfNeeded()
 import os
 import qt
 import ctk
 import vtk
 import sys
-import slicer
 import subprocess
 from slicer.ScriptedLoadableModule import *
 import pyvista as pv
@@ -13,9 +15,6 @@ MODULE_DIR = os.path.dirname(__file__)
 if MODULE_DIR not in sys.path:
     sys.path.append(MODULE_DIR)
 
-from FossilNsmCommon import FossilNsmCommonWidget, FossilNsmLogic
-
-
 class ShapeCompletion(ScriptedLoadableModule):
     def __init__(self, parent):
         super().__init__(parent)
@@ -23,7 +22,6 @@ class ShapeCompletion(ScriptedLoadableModule):
         self.parent.categories = ["FossilNSM"]
         self.parent.contributors = ["Wolcott et all"]
         self.parent.helpText = "A shape completion module."
-
 
 class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
 
