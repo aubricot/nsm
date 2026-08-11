@@ -15,6 +15,17 @@ from sklearn.manifold import TSNE
 import umap
 import ctk
 import qt
+try:
+    import matplotlib
+    import matplotlib.pyplot as plt
+except ImportError:
+    matplotlib = None
+    plt = None
+
+try:
+    import plotly.graph_objects as go
+except ImportError:
+    go = None
 from slicer.ScriptedLoadableModule import *
 
 FOSSIL_NSM_MESH_LAYOUT_ID = 702
@@ -41,6 +52,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self._plotsRenderedFor = None
         self._classificationMode = "single"
         self._allLatentsPath = None
+        self._fossilPath = None
         self._fossilLatentPath = None
         self._top5IndicesPath = None
         self.inputFolderPath = None
@@ -78,17 +90,16 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.tabWidget.addTab(inferenceTab, "Inference")
         self.addFossilNsmInputSection(inferenceLayout)
 
-        self.inputFolderButton = qt.QPushButton("Select Input Folder...")
+        self.inputFolderButton = qt.QPushButton("Select Input Folder")
         self.inputFolderButton.connect("clicked(bool)", self.onSelectInputFolder)
         self.inputFolderLabel = qt.QLabel("No folder selected (for batch classification)")
         self.inputFolderLabel.setWordWrap(True)
         self.inputLayout.addRow("Input Folder (Batch):", self.inputFolderButton)
         self.inputLayout.addRow("", self.inputFolderLabel)
 
-        self.loadShapeCompletionButton = qt.QPushButton("Load Shape Completion Result...")
+        self.loadShapeCompletionButton = qt.QPushButton("Load Shape Completion Result")
         self.loadShapeCompletionButton.connect("clicked(bool)", self.onLoadShapeCompletionResult)
-        self.loadShapeCompletionLabel = qt.QLabel(
-            "Pick a completed mesh from a previous Shape Completion run to classify it.")
+        self.loadShapeCompletionLabel = qt.QLabel("Pick a completed mesh from a previous Shape Completion run to classify it.")
         self.loadShapeCompletionLabel.setWordWrap(True)
         self.inputLayout.addRow("From Shape Completion:", self.loadShapeCompletionButton)
         self.inputLayout.addRow("", self.loadShapeCompletionLabel)
@@ -100,7 +111,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         inferenceLayout.addWidget(inferenceBottomCollapsible)
         inferenceBottomLayout = qt.QFormLayout(inferenceBottomCollapsible)
 
-        self.referenceMeshesButton = qt.QPushButton("Select Reference Mesh Library...")
+        self.referenceMeshesButton = qt.QPushButton("Select Reference Mesh Library")
         self.referenceMeshesButton.connect("clicked(bool)", self.onSelectReferenceMeshDirectory)
         self.referenceMeshesLabel = qt.QLabel("Optional: needed to visualize returned meshes")
         self.referenceMeshesLabel.setWordWrap(True)
@@ -120,12 +131,11 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.classifyFolderButton.connect("clicked(bool)", self.onClassifyFolder)
         inferenceBottomLayout.addRow(self.classifyFolderButton)
 
-        self.loadPreviousResultsButton = qt.QPushButton("Load Previous Classification Results...")
+        self.loadPreviousResultsButton = qt.QPushButton("Load Previous Classification Results")
         self.loadPreviousResultsButton.connect("clicked(bool)", self.onLoadPreviousResults)
         inferenceBottomLayout.addRow(self.loadPreviousResultsButton)
-        loadPreviousHint = qt.QLabel(
-            "Load bulk_summary.json or <mesh>_top5.json to inspect a previous run "
-            "in Explore Meshes / Explore Plots.")
+        loadPreviousHint = qt.QLabel("Load bulk_summary.json or <mesh>_top5.json to inspect a previous run "
+                                     "in Explore Meshes / Explore Plots.")
         loadPreviousHint.setWordWrap(True)
         inferenceBottomLayout.addRow("", loadPreviousHint)
 
@@ -236,7 +246,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.plotStatusLabel.setWordWrap(True)
         plotSidePanelLayout.addWidget(self.plotStatusLabel)
 
-        self.savePlotButton = qt.QPushButton("Save Current Plot (PNG + HTML)...")
+        self.savePlotButton = qt.QPushButton("Save Current Plot (PNG + HTML)")
         self.savePlotButton.connect("clicked(bool)", self.onSaveCurrentPlot)
         plotSidePanelLayout.addWidget(self.savePlotButton)
 
@@ -276,7 +286,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         batchHint.setWordWrap(True)
         batchResultsLayout.addWidget(batchHint)
 
-        self.exportBatchButton = qt.QPushButton("Export Batch Results (CSV / TXT)...")
+        self.exportBatchButton = qt.QPushButton("Export Batch Results (CSV)")
         self.exportBatchButton.connect("clicked(bool)", self.onExportBatchResults)
         batchResultsLayout.addWidget(self.exportBatchButton)
 
@@ -291,7 +301,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.classificationTable.horizontalHeader().setSectionResizeMode(qt.QHeaderView.Stretch)
         classificationLayout.addRow("Top-5 matches:", self.classificationTable)
 
-        self.exportTopMatchesButton = qt.QPushButton("Export Top-5 (CSV / TXT)...")
+        self.exportTopMatchesButton = qt.QPushButton("Export Top-5 (CSV)")
         self.exportTopMatchesButton.connect("clicked(bool)", self.onExportTopMatches)
         classificationLayout.addRow(self.exportTopMatchesButton)
 
@@ -323,6 +333,13 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.updateRunButton()
         self.onLogMessage("Loaded shape completion result as input mesh:\n" + path, color="#4CAF50")
 
+    def _pickExistingFile(self, directory, *names):
+        for name in names:
+            candidate = os.path.join(directory, name)
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
     def onLoadPreviousResults(self):
         startDir = ""
         candidate = self._classificationDir()
@@ -352,7 +369,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             self._bulkResults = data.get("results", [])
             self._bulkAllLatentsPath = data.get("all_latents")
             if self._bulkAllLatentsPath and not os.path.isfile(self._bulkAllLatentsPath):
-                # Fall back to a sibling file if the run folder moved.
                 sibling = os.path.join(resultDir, os.path.basename(self._bulkAllLatentsPath))
                 if os.path.isfile(sibling):
                     self._bulkAllLatentsPath = sibling
@@ -368,18 +384,12 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         # Single result (has a "matches" list) ------------------------------
         if isinstance(data, dict) and "matches" in data:
             self.classificationMatches = data.get("matches", [])
+            self._fossilPath = data.get("fossil_path") or data.get("fossil_name")
             self._classificationMode = "single"
 
-            def _pick(*names):
-                for name in names:
-                    candidate = os.path.join(resultDir, name)
-                    if os.path.isfile(candidate):
-                        return candidate
-                return None
-
-            self._allLatentsPath = _pick("all_latents.npy")
-            self._fossilLatentPath = _pick(base + "_fossil_latent.npy", "fossil_latent.npy")
-            self._top5IndicesPath = _pick(base + "_top5_indices.npy", "top5_indices.npy")
+            self._allLatentsPath = self._pickExistingFile(resultDir, "all_latents.npy")
+            self._fossilLatentPath = self._pickExistingFile(resultDir, base + "_fossil_latent.npy", "fossil_latent.npy")
+            self._top5IndicesPath = self._pickExistingFile(resultDir, base + "_top5_indices.npy", "top5_indices.npy")
             self._plotsRenderedFor = None
             self._updateClassificationTable()
 
@@ -392,9 +402,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
                 self.onLogMessage(
                     "Note: latent files {} not found next to the JSON; plots are unavailable "
                     "for this result.".format(", ".join(missing)), color="orange")
-            self.onLogMessage(
-                "Tip: use 'Select Input Mesh' (or 'Load Shape Completion Result') to also view "
-                "the original fossil in Explore Meshes.", color="orange")
             return
 
         slicer.util.errorDisplay(
@@ -410,8 +417,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             and self.configFilePath
             and self.modelFilePath
             and self.latentCodesFilePath
-            and self.outputFolderPath
-        )
+            and self.outputFolderPath)
 
     def updateRunButton(self):
         self.classifyButton.setEnabled(self.commonInputsReady())
@@ -439,9 +445,9 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         iterations = self._readIterations()
         if iterations is None:
             return
-        resultDirectory = self._classificationDir()
-        os.makedirs(resultDirectory, exist_ok=True)
         inputBase = os.path.splitext(os.path.basename(self.inputFilePath))[0]
+        resultDirectory = os.path.join(self._classificationDir(), inputBase)
+        os.makedirs(resultDirectory, exist_ok=True)
         resultPath = os.path.join(resultDirectory, inputBase + "_top5.json")
         logPath = os.path.join(resultDirectory, inputBase + "_classification.log")
         self._classificationMode = "single"
@@ -500,20 +506,17 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
 
     def onTabChanged(self, index):
         print("[FossilNSM] onTabChanged index={}".format(index))
-
         if index == 0:  # Inference
             self.setDefaultThreeDLayout()
-
         elif index == 1:  # Explore Meshes
             self._applyMeshLayout()
+            slicer.app.processEvents()
             self._loadMeshesIntoViewers()
             self._linkMeshViewers()
             self._styleViewers()
-
         elif index == 2:  # Explore Plots
             self._applyPlotLayout()
             self._renderLatentSpacePlots()
-
         elif index == self._batchTabIndex:  # Batch Results
             self.setDefaultThreeDLayout()
 
@@ -652,9 +655,39 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self._ensurePlotComputed("UMAP")
         self._showActivePlot("UMAP")
 
+    def _makeTable(self, name, x, y, labels):
+        t = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", name)
+        t.RemoveAllColumns()
+        xArr = vtk.vtkFloatArray()
+        xArr.SetName("x")
+        yArr = vtk.vtkFloatArray()
+        yArr.SetName("y")
+        labelArr = vtk.vtkStringArray()
+        labelArr.SetName("label")
+        for xi, yi, li in zip(x, y, labels):
+            xArr.InsertNextValue(float(xi))
+            yArr.InsertNextValue(float(yi))
+            labelArr.InsertNextValue(str(li))
+        t.AddColumn(xArr)
+        t.AddColumn(yArr)
+        t.AddColumn(labelArr)
+        return t
+
+    def _makeSeries(self, name, table, color, size=5):
+        s = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLPlotSeriesNode", name)
+        s.SetAndObserveTableNodeID(table.GetID())
+        s.SetXColumnName("x")
+        s.SetYColumnName("y")
+        s.SetLabelColumnName("label")
+        s.SetPlotType(slicer.vtkMRMLPlotSeriesNode.PlotTypeScatter)
+        s.SetLineStyle(slicer.vtkMRMLPlotSeriesNode.LineStyleNone)
+        s.SetMarkerStyle(slicer.vtkMRMLPlotSeriesNode.MarkerStyleSquare)
+        s.SetMarkerSize(size)
+        s.SetColor(*color)
+        return s
+
     def _buildPlot(self, coords, fossilIdx, top5Indices, title):
         print("[FossilNSM] _buildPlot title={}".format(title))
-        # Clean up old chart, its series, and tables in one go
         names = [title + ext for ext in ["_chart", "_bg", "_top5", "_fossil"]]
         old_nodes = [slicer.mrmlScene.GetFirstNodeByName(n) for n in names]
         if old_nodes[0]:  # If the chart exists, grab its series nodes too
@@ -662,7 +695,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         for node in filter(None, old_nodes):
             slicer.mrmlScene.RemoveNode(node)
 
-        # Extract filenames for hover labels
         train_filenames = []
         if self.configFilePath and os.path.isfile(self.configFilePath):
             try:
@@ -677,7 +709,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         valid_top5 = top5Indices[top5Indices < len(coords)]
         bgMask[valid_top5] = False
 
-        # Build formatted string arrays
         bgLabels = []
         for i, is_bg in enumerate(bgMask):
             if is_bg:
@@ -688,52 +719,21 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             match = self.classificationMatches[i] if i < len(self.classificationMatches) else {}
             name = match.get("mesh_name", "Mesh {}".format(idx))
             top5Labels.append("\nTop {} Match: {}".format(i + 1, name))
-        fossil_name = os.path.basename(self.inputFilePath) if self.inputFilePath else "Unknown"
+        fossil_name = (os.path.basename(self.inputFilePath) if self.inputFilePath
+                       else os.path.basename(self._fossilPath) if self._fossilPath
+                       else "Unknown")
         fossilLabels = ["\nFossil: {}".format(fossil_name)]
 
-        def makeTable(name, x, y, labels):
-            t = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", name)
-            t.RemoveAllColumns()
-            xArr = vtk.vtkFloatArray()
-            xArr.SetName("x")
-            yArr = vtk.vtkFloatArray()
-            yArr.SetName("y")
-            labelArr = vtk.vtkStringArray()
-            labelArr.SetName("label")  
-            for xi, yi, li in zip(x, y, labels):
-                xArr.InsertNextValue(float(xi))
-                yArr.InsertNextValue(float(yi))
-                labelArr.InsertNextValue(str(li))
-            t.AddColumn(xArr)
-            t.AddColumn(yArr)
-            t.AddColumn(labelArr)
-            return t
+        bgTable     = self._makeTable(title + "_bg",     coords[bgMask, 0],      coords[bgMask, 1],      bgLabels)
+        top5Table   = self._makeTable(title + "_top5",   coords[valid_top5, 0],  coords[valid_top5, 1],  top5Labels)
+        fossilTable = self._makeTable(title + "_fossil", [coords[fossilIdx, 0]], [coords[fossilIdx, 1]], fossilLabels)
 
-        bgTable     = makeTable(title + "_bg",     coords[bgMask, 0],      coords[bgMask, 1],      bgLabels)
-        top5Table   = makeTable(title + "_top5",   coords[valid_top5, 0],  coords[valid_top5, 1],  top5Labels)
-        fossilTable = makeTable(title + "_fossil", [coords[fossilIdx, 0]], [coords[fossilIdx, 1]], fossilLabels)
-
-        def makeSeries(name, table, color, size=5):
-            s = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLPlotSeriesNode", name)
-            s.SetAndObserveTableNodeID(table.GetID())
-            s.SetXColumnName("x")
-            s.SetYColumnName("y")
-            s.SetLabelColumnName("label")            
-            s.SetPlotType(slicer.vtkMRMLPlotSeriesNode.PlotTypeScatter)
-            s.SetLineStyle(slicer.vtkMRMLPlotSeriesNode.LineStyleNone)
-            s.SetMarkerStyle(slicer.vtkMRMLPlotSeriesNode.MarkerStyleSquare)
-            s.SetMarkerSize(size)
-            s.SetColor(*color)
-            return s
-
-        bgSeries     = makeSeries("Train Data",    bgTable,     (0.5, 0.5, 0.5), size=4)
-        top5Series   = makeSeries("Top-5 Matches", top5Table,   (0.2, 0.65, 0.9), size=10)
-        fossilSeries = makeSeries("Fossil",        fossilTable, (0.9, 0.6, 0.2), size=14)
+        bgSeries     = self._makeSeries("Train Data",    bgTable,     (0.5, 0.5, 0.5), size=4)
+        top5Series   = self._makeSeries("Top-5 Matches", top5Table,   (0.2, 0.65, 0.9), size=10)
+        fossilSeries = self._makeSeries("Fossil",        fossilTable, (0.9, 0.6, 0.2), size=14)
 
         chart = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLPlotChartNode", title + "_chart")
         chart.SetTitle(title)
-        
-        # Add to chart (fossil last so it draws on top)
         chart.AddAndObservePlotSeriesNodeID(bgSeries.GetID())
         chart.AddAndObservePlotSeriesNodeID(top5Series.GetID())
         chart.AddAndObservePlotSeriesNodeID(fossilSeries.GetID())
@@ -792,25 +792,29 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
     def _loadMeshesIntoViewers(self):
         if not self.classificationMatches:
             return
-        # Clean up old nodes
         self._clearClassificationNodes()
-        # Also sweep scene for any leftover nodes by known name patterns
         for nodeName in ["Input Fossil"] + ["Match {} - {}".format(m["rank"], m["mesh_name"]) for m in self.classificationMatches]:
             old = slicer.mrmlScene.GetFirstNodeByName(nodeName)
             if old:
                 slicer.mrmlScene.RemoveNode(old)
-
-        if self.inputFilePath and os.path.isfile(self.inputFilePath):
-            fossilNode = slicer.util.loadModel(self.inputFilePath)
-            fossilNode.SetName("Input Fossil")
-            fossilNode.CreateDefaultDisplayNodes()
-            fossilNode.GetDisplayNode().SetColor(0.9, 0.6, 0.2)
-            fossilNode.GetDisplayNode().SetAmbient(0.3)
-            fossilNode.GetDisplayNode().SetDiffuse(0.8)
-            fossilNode.GetDisplayNode().SetSpecular(0.0)
-            self._assignNodeToView(fossilNode, "FossilInput")
-            self._classificationNodes.append(fossilNode)
-            self._labelViewer("FossilInput", os.path.basename(self.inputFilePath))
+        fossilPath = self._resolveFossilPath()
+        self.onLogMessage("Resolved fossil path: {}".format(fossilPath), color=None if fossilPath else "orange")
+        if fossilPath and os.path.isfile(fossilPath):
+            fossilNode = slicer.util.loadModel(fossilPath)
+            if not fossilNode:
+                self.onLogMessage("Failed to load fossil mesh: " + fossilPath, color="red")
+            else:
+                fossilNode.SetName("Input Fossil")
+                fossilNode.CreateDefaultDisplayNodes()
+                fossilNode.GetDisplayNode().SetColor(0.9, 0.6, 0.2)
+                fossilNode.GetDisplayNode().SetAmbient(0.3)
+                fossilNode.GetDisplayNode().SetDiffuse(0.8)
+                fossilNode.GetDisplayNode().SetSpecular(0.0)
+                self._assignNodeToView(fossilNode, "FossilInput")
+                self._classificationNodes.append(fossilNode)
+                self._labelViewer("FossilInput", os.path.basename(fossilPath))
+        else:
+            self.onLogMessage("Fossil file not found on disk.", color="orange")
 
         for match in self.classificationMatches[:5]:
             tag = "Match{}".format(match["rank"])
@@ -829,16 +833,17 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             self._labelViewer(tag, match["mesh_name"])
 
     def _assignNodeToView(self, modelNode, viewTag):
-        # Remove all existing view restrictions first, then pin to exactly one view
         displayNode = modelNode.GetDisplayNode()
         displayNode.RemoveAllViewNodeIDs()
         viewNode = slicer.mrmlScene.GetSingletonNode(viewTag, "vtkMRMLViewNode")
         if viewNode:
             displayNode.AddViewNodeID(viewNode.GetID())
+            self.onLogMessage("Assigned {} to view {}".format(modelNode.GetName(), viewTag))
+        else:
+            self.onLogMessage("View node not found for tag: {}".format(viewTag), color="red")
 
     def _linkMeshViewers(self):
         tags = ["FossilInput", "Match1", "Match2", "Match3", "Match4", "Match5"]
-        # All views must share the same LinkedControl group for synced rotation
         for tag in tags:
             viewNode = slicer.mrmlScene.GetSingletonNode(tag, "vtkMRMLViewNode")
             if viewNode:
@@ -912,7 +917,9 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             self._loadBulkResults(self._classificationResultPath)
             return
         with open(self._classificationResultPath, encoding="utf-8") as stream:
-            self.classificationMatches = json.load(stream).get("matches", [])
+            data = json.load(stream)
+        self.classificationMatches = data.get("matches", [])
+        self._fossilPath = data.get("fossil_path") or data.get("fossil_name")
         self._plotsRenderedFor = None
         self._updateClassificationTable()
         self.onLogMessage("\n\n\nClassification complete. \n\nTop-5 matches saved to " + self._classificationResultPath, color="#4CAF50")
@@ -953,6 +960,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             return
         result = self._bulkResults[row]
         self.inputFilePath = result.get("input_path")
+        self._fossilPath = result.get("fossil_path") or result.get("fossil_name")
         if self.inputFilePath:
             self.inputFileLabel.setText(self.inputFilePath)
         self.classificationMatches = result.get("matches", [])
@@ -973,6 +981,15 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         found = glob.glob(os.path.join(self.referenceMeshDirectory, "**", name), recursive=True)
         return found[0] if found else None
 
+    def _resolveFossilPath(self):
+        if self.inputFilePath and os.path.isfile(self.inputFilePath):
+            return self.inputFilePath
+        if hasattr(self, "_fossilPath") and self._fossilPath:
+            if os.path.isfile(self._fossilPath):
+                return self._fossilPath
+
+        return None
+
     def _updateClassificationTable(self):
         self.classificationTable.setRowCount(len(self.classificationMatches))
         available = 0
@@ -989,7 +1006,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
                 available += 1
 
     # ------------------------------------------------------------------ #
-    #  Saving / exporting results (CSV, TXT, PNG, HTML)
+    #  Saving / exporting results (CSV, PNG, HTML)
     # ------------------------------------------------------------------ #
 
     def _noteExportDir(self, directory):
@@ -1017,26 +1034,20 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
 
     def _writeTable(self, base, headers, rows):
         rows = [[("" if value is None else str(value)) for value in row] for row in rows]
-        csvPath, txtPath = base + ".csv", base + ".txt"
+        csvPath = base + ".csv"
         with open(csvPath, "w", newline="", encoding="utf-8") as stream:
             writer = csv.writer(stream)
             writer.writerow(headers)
             writer.writerows(rows)
-        widths = [max([len(headers[i])] + [len(row[i]) for row in rows]) for i in range(len(headers))]
-        with open(txtPath, "w", encoding="utf-8") as stream:
-            stream.write("  ".join(headers[i].ljust(widths[i]) for i in range(len(headers))) + "\n")
-            for row in rows:
-                stream.write("  ".join(row[i].ljust(widths[i]) for i in range(len(headers))) + "\n")
-        return csvPath, txtPath
+        return csvPath
 
     def _autoSaveTables(self, base, headers, rows):
         try:
-            csvPath, txtPath = self._writeTable(base, headers, rows)
+            csvPath = self._writeTable(base, headers, rows)
             self._noteExportDir(os.path.dirname(csvPath))
-            self.onLogMessage(
-                "\n{}\n\n{}".format(csvPath, txtPath), color="#4CAF50")
+            self.onLogMessage("\n{}".format(csvPath), color="#4CAF50")
         except Exception as error:
-            self.onLogMessage("Could not auto-save CSV/TXT: {}".format(error), color="orange")
+            self.onLogMessage("Could not auto-save CSV: {}".format(error), color="orange")
 
     def onExportTopMatches(self):
         if not self.classificationMatches:
@@ -1044,13 +1055,13 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             return
         default = os.path.join(self._resultsDir(), "top5_matches.csv")
         path = qt.QFileDialog.getSaveFileName(
-            None, "Export Top-5 Matches", default, "CSV (*.csv);;Text (*.txt)")
+            None, "Export Top-5 Matches", default, "CSV (*.csv)")
         if not path:
             return
         headers, rows = self._topMatchesTable(self.classificationMatches)
-        csvPath, txtPath = self._writeTable(os.path.splitext(path)[0], headers, rows)
+        csvPath = self._writeTable(os.path.splitext(path)[0], headers, rows)
         self._noteExportDir(os.path.dirname(csvPath))
-        self.onLogMessage("Exported top-5 matches to:\n{}\n{}".format(csvPath, txtPath), color="#4CAF50")
+        self.onLogMessage("Exported top-5 matches to:\n{}".format(csvPath), color="#4CAF50")
 
     def _topMatchesTable(self, matches):
         headers = ["rank", "mesh_name", "cosine_distance", "latent_index", "training_path"]
@@ -1086,23 +1097,25 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             return
         default = os.path.join(self._resultsDir(), "batch_results.csv")
         path = qt.QFileDialog.getSaveFileName(
-            None, "Export Batch Results", default, "CSV (*.csv);;Text (*.txt)")
+            None, "Export Batch Results", default, "CSV (*.csv)")
         if not path:
             return
         headers, rows = self._batchTable(self._bulkResults)
-        csvPath, txtPath = self._writeTable(os.path.splitext(path)[0], headers, rows)
+        csvPath = self._writeTable(os.path.splitext(path)[0], headers, rows)
         self._noteExportDir(os.path.dirname(csvPath))
-        self.onLogMessage("Exported batch results to:\n{}\n{}".format(csvPath, txtPath), color="#4CAF50")
+        self.onLogMessage("Exported batch results to:\n{}".format(csvPath), color="#4CAF50")
 
     def _ensurePlotLibs(self):
-        try:
-            import matplotlib  # noqa: F401
-        except ImportError:
+        global matplotlib, plt, go
+
+        if matplotlib is None or plt is None:
             slicer.util.pip_install("matplotlib")
-        try:
-            import plotly  # noqa: F401
-        except ImportError:
+            import matplotlib
+            import matplotlib.pyplot as plt
+
+        if go is None:
             slicer.util.pip_install("plotly")
+            import plotly.graph_objects as go
 
     def _coordsForPlotType(self, plotType):
         return {
@@ -1134,7 +1147,9 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         for i, idx in enumerate(valid_top5):
             match = self.classificationMatches[i] if i < len(self.classificationMatches) else {}
             top5Labels.append("Top {}: {}".format(i + 1, match.get("mesh_name", "Mesh {}".format(idx))))
-        fossil_name = os.path.basename(self.inputFilePath) if self.inputFilePath else "Fossil"
+        fossil_name = (os.path.basename(self.inputFilePath) if self.inputFilePath
+                       else os.path.basename(self._fossilPath) if self._fossilPath
+                       else "Fossil")
         return {
             "bg": (coords[bgMask, 0], coords[bgMask, 1], bgLabels),
             "top5": (coords[valid_top5, 0], coords[valid_top5, 1], top5Labels),
@@ -1145,6 +1160,8 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         groups = self._plotGroups(coords)
         if self.inputFilePath:
             meshBase = os.path.splitext(os.path.basename(self.inputFilePath))[0]
+        elif self._fossilPath:
+            meshBase = os.path.splitext(os.path.basename(self._fossilPath))[0]
         elif self._previousResultsBaseName:
             meshBase = self._previousResultsBaseName
         else:
@@ -1161,9 +1178,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         _, _, fl = groups["fossil"]
 
         try:
-            import matplotlib
             matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
             fig, ax = plt.subplots(figsize=(8, 6))
             ax.scatter(bx, by, s=12, c="#808080", alpha=0.6, label="Train data")
             ax.scatter(tx, ty, s=60, c="#33a6e6", edgecolors="k", linewidths=0.3, label="Top-5 matches")
@@ -1180,7 +1195,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             self.onLogMessage("Could not save PNG for {}: {}".format(plotType, error), color="red")
 
         try:
-            import plotly.graph_objects as go
             fig = go.Figure()
             fig.add_trace(go.Scatter(
                 x=list(bx), y=list(by), mode="markers", name="Train data",
@@ -1213,12 +1227,10 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             return
         self._ensurePlotLibs()
         outDir = self._resultsDir()
-
         if self.saveAllPlotsCheckbox.checked:
             plotTypes = ["PCA", "t-SNE", "UMAP"]
         else:
             plotTypes = [self.plotTypeComboBox.currentText]
-
         saved = []
         for plotType in plotTypes:
             coords = self._coordsForPlotType(plotType)
@@ -1243,11 +1255,9 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         prefixes = ["Input Fossil", "Match 1 - ", "Match 2 - ", "Match 3 - ", "Match 4 - ", "Match 5 - ",
                     "Top 1 - ", "Top 2 - ", "Top 3 - ", "Top 4 - ", "Top 5 - ",]
         nodesToRemove = []
-
         for node in self._classificationNodes:
             if node and slicer.mrmlScene.IsNodePresent(node):
                 nodesToRemove.append(node)
-
         collection = slicer.mrmlScene.GetNodes()
         collection.InitTraversal()
         for _ in range(collection.GetNumberOfItems()):
@@ -1257,7 +1267,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             name = node.GetName() if hasattr(node, "GetName") else ""
             if any(name.startswith(prefix) for prefix in prefixes):
                 nodesToRemove.append(node)
-
         seen = set()
         uniqueNodes = []
         for node in nodesToRemove:
