@@ -902,14 +902,12 @@ class ClassificationWidget(FossilNsmHuggingFaceAuthMixin, FossilNsmCommonWidget,
 
         for match in self.classificationMatches[:5]:
             tag = "Match{}".format(match["rank"])
-            res = self._resolveMatch(match)
-            if res.kind != "path":
-                self.onLogMessage(res.reason, color="red")
+            meshPath = self._referencePath(match)
+            if not meshPath:
                 continue
-            meshPath = res.value
             node = slicer.util.loadModel(meshPath)
             node.SetName("Match {} - {}".format(match["rank"], match["mesh_name"]))
-            self._normalizeForDisplay(node)
+            # self._normalizeForDisplay(node) # TO DO: see if this necessary; was in Sean's code
             node.CreateDefaultDisplayNodes()
             node.GetDisplayNode().SetColor(0.2, 0.65, 0.9)
             node.GetDisplayNode().SetAmbient(0.3)
@@ -929,7 +927,7 @@ class ClassificationWidget(FossilNsmHuggingFaceAuthMixin, FossilNsmCommonWidget,
         else:
             self.onLogMessage("View node not found for tag: {}".format(viewTag), color="red")
 
-    def _normalizeForDisplay(self, modelNode):
+    def _normalizeForDisplay(self, modelNode): ## TO DO: Check if this is necessary; was in Sean code
         # Display only: center each mesh at the origin and scale to a common size so
         # the comparison panels line up. Does not touch the SDF pipeline or results.
         poly = modelNode.GetPolyData()
@@ -1088,14 +1086,6 @@ class ClassificationWidget(FossilNsmHuggingFaceAuthMixin, FossilNsmCommonWidget,
         self._plotsRenderedFor = None
         self._updateClassificationTable()
         self.onLogMessage("Loaded batch result: " + result.get("input_name", ""), color="#4CAF50")
-
-    def _resolveMatch(self, match):
-        # Never let a backend exception escape a Qt slot and abort the viewer/table loop.
-        meshName = match.get("mesh_name", "")
-        try:
-            return self._referenceBackend.resolve(meshName)
-        except Exception as e:
-            return Resolution("missing", None, "Could not resolve {}: {}".format(meshName, e), STATE_MISSING)
             
     def _referencePath(self, match):
         if not self.referenceMeshDirectory:
