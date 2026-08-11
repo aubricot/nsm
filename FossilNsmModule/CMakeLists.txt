@@ -18,7 +18,5 @@ slicerMacroBuildScriptedModule(
   SCRIPTS
     ${MODULE_PKG_CLASSIFICATION}.py
     ${MODULE_PKG_COMMON}.py
-    utils/reference_library.py
-    utils/draco_glb.py
   RESOURCES ""
 )
