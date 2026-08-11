@@ -1096,16 +1096,16 @@ class ClassificationWidget(FossilNsmHuggingFaceAuthMixin, FossilNsmCommonWidget,
             return self._referenceBackend.resolve(meshName)
         except Exception as e:
             return Resolution("missing", None, "Could not resolve {}: {}".format(meshName, e), STATE_MISSING)
-
+            
     def _referencePath(self, match):
-        res = self._resolveMatch(match)
-        return res.value if res.kind == "path" else None
-
-    def _availability(self, match):
-        try:
-            return self._referenceBackend.availability(match.get("mesh_name", ""))
-        except Exception:
-            return STATE_MISSING
+        if not self.referenceMeshDirectory:
+            return None
+        name = match.get("mesh_name", "")
+        direct = os.path.join(self.referenceMeshDirectory, name)
+        if os.path.isfile(direct):
+            return direct
+        found = glob.glob(os.path.join(self.referenceMeshDirectory, "**", name), recursive=True)
+        return found[0] if found else None
 
     def _resolveFossilPath(self):
         if self.inputFilePath and os.path.isfile(self.inputFilePath):
@@ -1115,18 +1115,21 @@ class ClassificationWidget(FossilNsmHuggingFaceAuthMixin, FossilNsmCommonWidget,
                 return self._fossilPath
 
         return None
-
+        
     def _updateClassificationTable(self):
         self.classificationTable.setRowCount(len(self.classificationMatches))
+        available = 0
         for row, match in enumerate(self.classificationMatches):
-            state = self._availability(match)
+            meshPath = self._referencePath(match)
             values = [
                 match["mesh_name"],
                 "{:.6f}".format(match["cosine_distance"]),
-                state,
+                "Yes" if meshPath else "No - select matching library",
             ]
             for column, value in enumerate(values):
                 self.classificationTable.setItem(row, column, qt.QTableWidgetItem(value))
+            if meshPath:
+                available += 1
 
     # ------------------------------------------------------------------ #
     #  Saving / exporting results (CSV, PNG, HTML)
