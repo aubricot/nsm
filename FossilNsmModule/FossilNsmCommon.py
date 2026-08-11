@@ -6,6 +6,9 @@ from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadab
 
 FOSSIL_NSM_MESH_LAYOUT_ID = 702
 FOSSIL_NSM_PLOT_LAYOUT_ID = 703
+HF_TOKEN_SETTINGS_KEY = "FossilNsm/HuggingFaceTokenPath"
+HF_REPO_SETTINGS_KEY = "FossilNsm/HuggingFaceRepoId"
+HF_REVISION_SETTINGS_KEY = "FossilNsm/HuggingFaceRevision"
 
 class FossilNsmCommon(ScriptedLoadableModule):
     def __init__(self, parent):
@@ -291,6 +294,151 @@ class FossilNsmCommonWidget:
         viewNode.SetAxisLabelsVisible(False)
         threeDWidget.threeDView().resetFocalPoint()
 
+class FossilNsmHuggingFaceAuthMixin:
+    def initializeHuggingFaceState(self):
+        from reference_library import HF_REPO_ID, HF_DATASET_REVISION
+        settings = qt.QSettings()
+        self.hfTokenPath = settings.value(HF_TOKEN_SETTINGS_KEY, None)
+        self.hfRepoId = settings.value(HF_REPO_SETTINGS_KEY, HF_REPO_ID)
+        # Empty stored value means the user cleared it: float to latest (None).
+        self.hfRevision = settings.value(HF_REVISION_SETTINGS_KEY, HF_DATASET_REVISION) or None
+
+    def addHuggingFaceTokenSection(self, parentLayout):
+        row = qt.QHBoxLayout()
+
+        self.hfTokenPathLabel = qt.QLabel(self.hfTokenPath or "Using huggingface-cli login")
+        self.hfTokenPathLabel.setWordWrap(True)
+
+        selectButton = qt.QPushButton("Select token file...")
+        selectButton.setToolTip(
+            "Point at a file containing your HuggingFace token. Only the path is saved, "
+            "not the token. Leave unset to use huggingface-cli login or HF_TOKEN."
+        )
+        selectButton.connect("clicked()", self.onSelectHuggingFaceTokenFile)
+
+        clearButton = qt.QPushButton("Clear")
+        clearButton.setToolTip("Forget the stored path and fall back to the CLI login / HF_TOKEN.")
+        clearButton.connect("clicked()", self.onClearHuggingFaceTokenPath)
+
+        row.addWidget(qt.QLabel("HF token file:"))
+        row.addWidget(self.hfTokenPathLabel)
+        row.addWidget(selectButton)
+        row.addWidget(clearButton)
+        parentLayout.addLayout(row)
+
+        repoRow = qt.QHBoxLayout()
+        self.hfRepoEdit = qt.QLineEdit(self.hfRepoId)
+        self.hfRepoEdit.setPlaceholderText("Owner/dataset-name")
+        self.hfRepoEdit.setToolTip("HuggingFace dataset repo id, e.g. Owner/dataset-name.")
+        self.hfRepoEdit.connect("editingFinished()", self.onHuggingFaceRepoChanged)
+        self.hfRevisionEdit = qt.QLineEdit(self.hfRevision or "")
+        self.hfRevisionEdit.setPlaceholderText("latest")
+        self.hfRevisionEdit.setToolTip("Dataset revision to pin (commit/tag/branch). Leave blank for latest.")
+        self.hfRevisionEdit.connect("editingFinished()", self.onHuggingFaceRevisionChanged)
+        repoRow.addWidget(qt.QLabel("Dataset repo:"))
+        repoRow.addWidget(self.hfRepoEdit)
+        repoRow.addWidget(qt.QLabel("Revision:"))
+        repoRow.addWidget(self.hfRevisionEdit)
+        parentLayout.addLayout(repoRow)
+
+    def onSelectHuggingFaceTokenFile(self):
+        path = qt.QFileDialog.getOpenFileName(None, "Select HuggingFace Token File")
+        if not path:
+            return
+
+        if not self.readTokenFile(path):
+            self.onLogMessage("That file is empty or unreadable. Token path not saved.", color="red")
+            return
+
+        self.hfTokenPath = path
+        qt.QSettings().setValue(HF_TOKEN_SETTINGS_KEY, path)
+        self.hfTokenPathLabel.setText(path)
+        self.onLogMessage("Token file path saved. The token itself is not stored.", color="#4CAF50")
+
+    def onClearHuggingFaceTokenPath(self):
+        self.hfTokenPath = None
+        qt.QSettings().remove(HF_TOKEN_SETTINGS_KEY)
+        self.hfTokenPathLabel.setText("Using huggingface-cli login")
+        self.onLogMessage("Stored token path cleared.", color="#4CAF50")
+
+    def onHuggingFaceRepoChanged(self):
+        repo = self.hfRepoEdit.text.strip()
+        if repo == self.hfRepoId:
+            return
+        self.hfRepoId = repo
+        qt.QSettings().setValue(HF_REPO_SETTINGS_KEY, repo)
+        self.onLogMessage("Reference dataset repo set to {}.".format(repo or "(none)"), color="#4CAF50")
+        self.onHuggingFaceRepoConfigChanged()
+
+    def onHuggingFaceRevisionChanged(self):
+        revision = self.hfRevisionEdit.text.strip() or None
+        if revision == self.hfRevision:
+            return
+        self.hfRevision = revision
+        # Store "" (not remove) so a cleared field persists as latest across sessions.
+        qt.QSettings().setValue(HF_REVISION_SETTINGS_KEY, revision or "")
+        self.onLogMessage("Reference dataset revision set to {}.".format(revision or "latest"), color="#4CAF50")
+        self.onHuggingFaceRepoConfigChanged()
+
+    def onHuggingFaceRepoConfigChanged(self):
+        # Widget hook: rebuild the backend when repo/revision changes. Overridden where used.
+        pass
+
+    def validateHuggingFaceToken(self):
+        checks = []
+
+        envSet = bool(os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN"))
+        checks.append(("HF_TOKEN environment variable", envSet, "set" if envSet else "not set"))
+
+        pathSet = bool(self.hfTokenPath)
+        pathOk = pathSet and bool(self.readTokenFile(self.hfTokenPath))
+        if pathSet:
+            detail = self.hfTokenPath if pathOk else "{} (empty or unreadable)".format(self.hfTokenPath)
+        else:
+            detail = "not set"
+        checks.append(("Stored token file", pathOk, detail))
+
+        cliToken, cliSource = self.detectCachedToken()
+        checks.append(("huggingface-cli login cache", bool(cliToken),
+                       cliSource if cliToken else "not logged in"))
+
+        return checks
+
+    def updateHuggingFaceChecklistUI(self):
+        checks = self.validateHuggingFaceToken()
+        lines = []
+        anyOk = False
+        for label, ok, detail in checks:
+            icon = "OK" if ok else "--"
+            lines.append("{} {} ({})".format(icon, label, detail))
+            anyOk = anyOk or ok
+        if hasattr(self, "hfTokenChecklist"):
+            self.hfTokenChecklist.setPlainText("\n".join(lines))
+        return anyOk
+
+    def readTokenFile(self, path):
+        from reference_library import read_token_file
+        return read_token_file(path)
+
+    def detectCachedToken(self):
+        # huggingface_hub already resolves env + the OS cache location, so use it
+        # directly rather than guessing paths. It is a hard dependency of download.
+        try:
+            from huggingface_hub import get_token, constants
+        except ImportError:
+            return None, "huggingface_hub not installed"
+
+        cachePath = getattr(constants, "HF_TOKEN_PATH", "the huggingface cache")
+        token = get_token()
+        if not token:
+            return None, "not logged in ({})".format(cachePath)
+        return token.strip(), cachePath
+
+    def resolveHuggingFaceToken(self):
+        from reference_library import resolve_hf_token
+        return resolve_hf_token(stored_path=self.hfTokenPath)
+
+
 class FossilNsmLogic(ScriptedLoadableModuleLogic):
     @staticmethod
     def installDependenciesIfNeeded():
@@ -363,3 +511,13 @@ class FossilNsmLogic(ScriptedLoadableModuleLogic):
             import vtk
         except ImportError:
             slicer.util.pip_install("vtk")
+
+        try:
+            import huggingface_hub
+        except ImportError:
+            slicer.util.pip_install("huggingface_hub")
+
+        try:
+            import DracoPy
+        except ImportError:
+            slicer.util.pip_install("DracoPy")

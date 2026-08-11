@@ -33,6 +33,13 @@ FOSSIL_NSM_PLOT_LAYOUT_ID = 703
 MODULE_DIR = os.path.dirname(__file__)
 if MODULE_DIR not in sys.path:
     sys.path.append(MODULE_DIR)
+from FossilNsmCommon import FossilNsmCommonWidget, FossilNsmLogic, FossilNsmHuggingFaceAuthMixin
+
+UTILS_DIR = os.path.join(MODULE_DIR, "utils")
+if UTILS_DIR not in sys.path:
+    sys.path.append(UTILS_DIR)
+from reference_library import LocalFolderBackend, HuggingFaceBackend, Resolution, STATE_MISSING
+
 
 class Classification(ScriptedLoadableModule):
     def __init__(self, parent):
@@ -42,11 +49,15 @@ class Classification(ScriptedLoadableModule):
         self.parent.contributors = ["Wolcott et all"]
         self.parent.helpText = "Classify an input fossil mesh by ranking the nearest latent-space meshes."
 
-class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
+
+class ClassificationWidget(FossilNsmHuggingFaceAuthMixin, FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
     def setup(self):
         super().setup()
         self.initializeFossilNsmState()
         self.referenceMeshDirectory = None
+        self.initializeHuggingFaceState()
+        self._referenceSource = "local"
+        self._referenceBackend = self._makeBackend()
         self.classificationMatches = []
         self._classificationNodes = []
         self._plotsRenderedFor = None
@@ -111,12 +122,37 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         inferenceLayout.addWidget(inferenceBottomCollapsible)
         inferenceBottomLayout = qt.QFormLayout(inferenceBottomCollapsible)
 
+        # Reference source selector
+        self.referenceSourceCombo = qt.QComboBox()
+        self.referenceSourceCombo.addItems(["Local folder", "HuggingFace (gated)"])
+        self.referenceSourceCombo.connect("currentIndexChanged(int)", self.onReferenceSourceChanged)
+        inferenceBottomLayout.addRow("Reference Source:", self.referenceSourceCombo)
+
+        # Local folder controls
         self.referenceMeshesButton = qt.QPushButton("Select Reference Mesh Library")
         self.referenceMeshesButton.connect("clicked(bool)", self.onSelectReferenceMeshDirectory)
         self.referenceMeshesLabel = qt.QLabel("Optional: needed to visualize returned meshes")
         self.referenceMeshesLabel.setWordWrap(True)
         inferenceBottomLayout.addRow("Reference Mesh Library:", self.referenceMeshesButton)
         inferenceBottomLayout.addRow("", self.referenceMeshesLabel)
+
+        # HuggingFace controls
+        self.hfControls = qt.QWidget()
+        hfControlsLayout = qt.QVBoxLayout(self.hfControls)
+        hfControlsLayout.setContentsMargins(0, 0, 0, 0)
+        self.addHuggingFaceTokenSection(hfControlsLayout)
+        self.hfTokenChecklist = qt.QPlainTextEdit()
+        self.hfTokenChecklist.setReadOnly(True)
+        self.hfTokenChecklist.setFixedHeight(70)
+        hfControlsLayout.addWidget(self.hfTokenChecklist)
+        self.prefetchButton = qt.QPushButton("Prefetch entire library (175 MB)")
+        self.prefetchButton.connect("clicked(bool)", self.onPrefetchLibrary)
+        hfControlsLayout.addWidget(self.prefetchButton)
+        hfNote = qt.QLabel("Compressed for download and slightly lossy. Use the source .vtk for precise measurements.")
+        hfNote.setWordWrap(True)
+        hfControlsLayout.addWidget(hfNote)
+        self.hfControls.setVisible(False)
+        inferenceBottomLayout.addRow(self.hfControls)
 
         self.classificationIterationsInput = qt.QLineEdit("1000")
         inferenceBottomLayout.addRow("Latent Optimization Iterations:", self.classificationIterationsInput)
@@ -318,6 +354,52 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             return
         self.referenceMeshDirectory = path
         self.referenceMeshesLabel.setText(path)
+        self._referenceBackend = self._makeBackend()
+        self._updateClassificationTable()
+
+    def _makeBackend(self):
+        if self._referenceSource == "huggingface":
+            return HuggingFaceBackend(
+                repo_id=self.hfRepoId, revision=self.hfRevision,
+                token_provider=self.resolveHuggingFaceToken)
+        return LocalFolderBackend(self.referenceMeshDirectory)
+
+    def onHuggingFaceRepoConfigChanged(self):
+        self._referenceBackend = self._makeBackend()
+        self._updateClassificationTable()
+
+    def onReferenceSourceChanged(self, index):
+        self._referenceSource = "huggingface" if index == 1 else "local"
+        isHf = self._referenceSource == "huggingface"
+        self.referenceMeshesButton.setVisible(not isHf)
+        self.referenceMeshesLabel.setVisible(not isHf)
+        self.hfControls.setVisible(isHf)
+        if isHf:
+            self.updateHuggingFaceChecklistUI()
+        self._referenceBackend = self._makeBackend()
+        self._updateClassificationTable()
+
+    def onPrefetchLibrary(self):
+        if not self.hfRepoId:
+            self.onLogMessage("Enter a HuggingFace dataset repo first.", color="red")
+            return
+        try:
+            token = self.resolveHuggingFaceToken()
+        except ValueError as e:
+            self.onLogMessage(str(e), color="red")
+            return
+        self.onLogMessage("\n\n\nPrefetching reference library...", color="#4CAF50")
+        slicer.app.processEvents()
+        try:
+            from huggingface_hub import snapshot_download
+            snapshot_download(
+                self.hfRepoId, repo_type="dataset",
+                revision=self.hfRevision, token=token,
+                allow_patterns=["*.glb"])
+        except Exception as e:
+            self.onLogMessage("Prefetch failed: check your network. " + str(e), color="red")
+            return
+        self.onLogMessage("\n\n\nPrefetch complete. Meshes now render with no network.", color="#4CAF50")
         self._updateClassificationTable()
 
     def onLoadShapeCompletionResult(self):
@@ -514,6 +596,8 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             self._loadMeshesIntoViewers()
             self._linkMeshViewers()
             self._styleViewers()
+            #self._resetMeshViews() # TO DO: Check if needed; was in Sean code
+
         elif index == 2:  # Explore Plots
             self._applyPlotLayout()
             self._renderLatentSpacePlots()
@@ -823,6 +907,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
                 continue
             node = slicer.util.loadModel(meshPath)
             node.SetName("Match {} - {}".format(match["rank"], match["mesh_name"]))
+            # self._normalizeForDisplay(node) # TO DO: see if this necessary; was in Sean's code
             node.CreateDefaultDisplayNodes()
             node.GetDisplayNode().SetColor(0.2, 0.65, 0.9)
             node.GetDisplayNode().SetAmbient(0.3)
@@ -841,6 +926,37 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             self.onLogMessage("Assigned {} to view {}".format(modelNode.GetName(), viewTag))
         else:
             self.onLogMessage("View node not found for tag: {}".format(viewTag), color="red")
+
+    def _normalizeForDisplay(self, modelNode): ## TO DO: Check if this is necessary; was in Sean code
+        # Display only: center each mesh at the origin and scale to a common size so
+        # the comparison panels line up. Does not touch the SDF pipeline or results.
+        poly = modelNode.GetPolyData()
+        if not poly or poly.GetNumberOfPoints() == 0:
+            return
+        bounds = [0.0] * 6
+        poly.GetBounds(bounds)
+        cx = (bounds[0] + bounds[1]) / 2.0
+        cy = (bounds[2] + bounds[3]) / 2.0
+        cz = (bounds[4] + bounds[5]) / 2.0
+        radius = max(bounds[1] - bounds[0], bounds[3] - bounds[2], bounds[5] - bounds[4]) / 2.0
+        if radius <= 0:
+            return
+        transform = vtk.vtkTransform()
+        transform.PostMultiply()
+        transform.Translate(-cx, -cy, -cz)
+        transform.Scale(1.0 / radius, 1.0 / radius, 1.0 / radius)
+        filt = vtk.vtkTransformPolyDataFilter()
+        filt.SetInputData(poly)
+        filt.SetTransform(transform)
+        filt.Update()
+        modelNode.SetAndObservePolyData(filt.GetOutput())
+
+    def _resetMeshViews(self):
+        layoutManager = slicer.app.layoutManager()
+        for i in range(layoutManager.threeDViewCount):
+            view = layoutManager.threeDWidget(i).threeDView()
+            view.resetFocalPoint()
+            view.resetCamera()
 
     def _linkMeshViewers(self):
         tags = ["FossilInput", "Match1", "Match2", "Match3", "Match4", "Match5"]
@@ -970,7 +1086,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self._plotsRenderedFor = None
         self._updateClassificationTable()
         self.onLogMessage("Loaded batch result: " + result.get("input_name", ""), color="#4CAF50")
-
+            
     def _referencePath(self, match):
         if not self.referenceMeshDirectory:
             return None
@@ -989,7 +1105,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
                 return self._fossilPath
 
         return None
-
+        
     def _updateClassificationTable(self):
         self.classificationTable.setRowCount(len(self.classificationMatches))
         available = 0
@@ -1278,6 +1394,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             if node and slicer.mrmlScene.IsNodePresent(node):
                 slicer.mrmlScene.RemoveNode(node)
         self._classificationNodes = []
+
 
 class ClassificationLogic(FossilNsmLogic):
     pass
