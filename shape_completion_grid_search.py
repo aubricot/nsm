@@ -14,14 +14,10 @@ import sys
 import pyvista as pv
 import pymskt.mesh.meshes as meshes
 from scipy.spatial import cKDTree
-from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
-import matplotlib.pyplot as plt
 from NSM.mesh import create_mesh
 import vtk
 import re
 import random
-import open3d as o3d
 from NSM.helper_funcs import NumpyTransform, load_config, load_model_and_latents, convert_ply_to_vtk, fixed_point_coords, safe_load_mesh_scalars 
 from NSM.optimization import pca_initialize_latent, get_top_k_pcs, optimize_latent_partial, normalize_mesh, get_norm_params, encode_latent, reconstruct_mesh_from_latent, build_sdf_dataset
 # Monkey Patch into pymskt.mesh.meshes.Mesh
@@ -115,7 +111,7 @@ def chamfer_distance(pred_path, gt_path, n_samples=20000):
 def grid_search(pairs, model, config, mean_latent, latent_codes, device, out_dir, n_trials=15, valN=30, log_path_csv=None, log_path_json=None):
     # Set up directory for fine-tuning experiemnts
     os.makedirs(out_dir, exist_ok=True)
-    val_subset = pairs[:valN]
+    val_subset = random.sample(pairs, min(valN, len(pairs)))
     best = {'score': float('inf'), 'cfg': None}
     rows = []
     # Define how many PCs describe X% of variance
@@ -179,7 +175,7 @@ def grid_search(pairs, model, config, mean_latent, latent_codes, device, out_dir
             mesh_pv.save(completed_path)
 
             # Calculate chamfer distance between predicted mesh and ground truth
-            cd = chamfer_distance(completed_path, gt_path)
+            cd = chamfer_distance(completed_path, gt_path, n_samples=5000)
             mesh_time = time.time() - start
             scores.append(cd)
             times.append(mesh_time)
@@ -214,7 +210,7 @@ for pm_path, gt_path in inf_subset:
         print(f"\033[32m\n=== Processing {os.path.basename(pm_path)} ===\033[0m")
         # Make a new dir to save predictions
         vert_fname = pm_path
-        outfpath = TRAIN_DIR + '/shape_completion/predictions/' + os.path.splitext(os.path.basename(vert_fname))[0] # TO DO: Adjust to desired outpath
+        outfpath = TRAIN_DIR + '/shape_completion/fine_tuning/best_cfg_predictions/' + os.path.splitext(os.path.basename(vert_fname))[0] # TO DO: Adjust to desired outpath
         print("Making a new directory to save model predictions and outputs at: ", outfpath)
         os.makedirs(outfpath, exist_ok=True)
 
@@ -230,9 +226,9 @@ for pm_path, gt_path in inf_subset:
         latent_opt = encode_latent(decoder=model, points=points.squeeze(), sdf_vals=sdf_vals, latent_dim=latent_codes.shape[1], 
                                 mean_latent=mean_latent, latent_codes=latent_codes, top_k_reg=best_cfg['top_k'], latent_std=best_cfg['latent_std'],
                                 iters1=best_cfg['iters1'], iters2=best_cfg['iters2'], lr1=best_cfg['lr1'], lr2=best_cfg['lr2'], 
-                                lambda_reg1=best_cfg['lambda1'], lambda_reg2=best_cfg['lambda2'], clamp_val1=best_cfg['clamp'], clamp_val2=None, 
-                                scheduler_step1=best_cfg['sched_step'], scheduler_step2=best_cfg['sched_step'], scheduler_gamma1=best_cfg['sched_gamma'],
-                                scheduler_gamma2=best_cfg['sched_gamma'], batch_inference_size=best_cfg['batch_infer']) 
+                                lambda_reg1=best_cfg['lambda1'], lambda_reg2=best_cfg['lambda2'], clamp_val1=best_cfg['clamp1'], clamp_val2=best_cfg['clamp2'], 
+                                scheduler_step1=best_cfg['sched_step'], scheduler_step2=best_cfg['sched_step'], scheduler_gamma1=best_cfg['sched_gamma1'],
+                                scheduler_gamma2=best_cfg['sched_gamma2'], batch_inference_size=best_cfg['batch_infer']) 
 
         # Reconstruction mesh from latent
         mesh_out = reconstruct_mesh_from_latent(vert_fname, model, latent_opt, best_cfg)
@@ -252,7 +248,7 @@ for pm_path, gt_path in inf_subset:
         mesh_pv.save(compl_path)
 
         # Calculate chamfer distance between shape completed and original-ground truth mesh
-        cd = chamfer_distance(compl_path, gt_path)
+        cd = chamfer_distance(compl_path, gt_path, n_samples=20000)
         print(f"\n{os.path.basename(pm_path)} Chamfer={cd:.4f} → {compl_path}\n") 
         best_summary_log.append({'mesh': os.path.basename(pm_path),
                             'chamfer': cd,
@@ -268,7 +264,7 @@ for pm_path, gt_path in inf_subset:
         continue
 
 summary_df = pd.DataFrame(best_summary_log)
-summary_df_fpath = TRAIN_DIR + '/shape_completion/predictions/inference_summary.csv'
+summary_df_fpath = TRAIN_DIR + '/shape_completion/fine_tuning/best_cfg_predictions/inference_summary.csv'
 summary_df.to_csv(summary_df_fpath, index=False)
 print(f"\nMean Chamfer across {len(summary_df)} meshes: {summary_df['chamfer'].mean():.4f}")
 print("Outputs logged to: ", summary_df_fpath)
