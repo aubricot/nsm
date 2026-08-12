@@ -109,7 +109,7 @@ def main():
     model, _, latent_codes = load_model_and_latents(args.model, args.latent_codes, config, device)
     model.eval()
     mean_latent = latent_codes.mean(dim=0, keepdim=True)
-    latent_std = latent_codes.std().mean()
+    latent_std = float(latent_codes.std().mean().item())
     _, top_k_reg = get_top_k_pcs(latent_codes, threshold=0.99)
 
     ckpt = torch.load(args.encoder, map_location=device)
@@ -117,85 +117,95 @@ def main():
     enc.load_state_dict(ckpt["model"]); enc.eval()
     n_points = ckpt["n_points"]
 
+    csv_path = os.path.join(args.out_dir, "results.csv")
+    file_exists = os.path.exists(csv_path)
+    fieldnames = ["shape", "enc_chamfer", "opt_chamfer", "enc_time", "opt_time", "speedup"]
+    f_csv = open(csv_path, "a", newline="")
+    w_csv = csv.DictWriter(f_csv, fieldnames=fieldnames)
+    if not file_exists:
+        w_csv.writeheader()
+
     sel = rng.choice(latent_codes.shape[0], args.n_shapes, replace=False)
     rows = []
-    for i in sel:
-        z_true = latent_codes[int(i):int(i) + 1].to(device)
-        gt_pts, gt_mesh = recon_surface(model, z_true, args.res, device)
-        if gt_pts is None:
-            print(f"[{int(i)}] skipped (no GT surface)")
-            continue
-        gt_path = os.path.join(args.out_dir, f"shape_{int(i)}_gt.vtk")
-        gt_mesh.save_mesh(gt_path)
+    try: 
+        for i in sel:
+            z_true = latent_codes[int(i):int(i) + 1].to(device)
+            gt_pts, gt_mesh = recon_surface(model, z_true, args.res, device)
+            if gt_pts is None:
+                print(f"[{int(i)}] skipped (no GT surface)")
+                continue
+            gt_path = os.path.join(args.out_dir, f"shape_{int(i)}_gt.vtk")
+            gt_mesh.save_mesh(gt_path)
 
-        # production SDF sampling on the full GT mesh, then crop to a partial input
-        ds = SDFSamples(
-            list_mesh_paths=[gt_path], multiprocessing=False,
-            subsample=config["samples_per_object_per_batch"], print_filename=False,
-            n_pts=config["n_pts_per_object"], p_near_surface=config["percent_near_surface"],
-            p_further_from_surface=config["percent_further_from_surface"],
-            sigma_near=config["sigma_near"], sigma_far=config["sigma_far"],
-            rand_function=config["random_function"], center_pts=config["center_pts"],
-            norm_pts=config["normalize_pts"], scale_method=config["scale_method"],
-            reference_mesh=None, verbose=False, save_cache=config["cache"],
-            equal_pos_neg=config["equal_pos_neg"], fix_mesh=config["fix_mesh"])
-        sample, _ = ds[0]
-        pts_full = sample["xyz"].to(device).squeeze()
-        sdf_full = sample["gt_sdf"].to(device).reshape(-1, 1)
-        part_pts, part_sdf = crop_partial(pts_full, sdf_full, keep=args.keep, rng=rng)
+            # production SDF sampling on the full GT mesh, then crop to a partial input
+            ds = SDFSamples(
+                list_mesh_paths=[gt_path], multiprocessing=False,
+                subsample=config["samples_per_object_per_batch"], print_filename=False,
+                n_pts=config["n_pts_per_object"], p_near_surface=config["percent_near_surface"],
+                p_further_from_surface=config["percent_further_from_surface"],
+                sigma_near=config["sigma_near"], sigma_far=config["sigma_far"],
+                rand_function=config["random_function"], center_pts=config["center_pts"],
+                norm_pts=config["normalize_pts"], scale_method=config["scale_method"],
+                reference_mesh=None, verbose=False, save_cache=config["cache"],
+                equal_pos_neg=config["equal_pos_neg"], fix_mesh=config["fix_mesh"])
+            sample, _ = ds[0]
+            pts_full = sample["xyz"].to(device).squeeze()
+            sdf_full = sample["gt_sdf"].to(device).reshape(-1, 1)
+            part_pts, part_sdf = crop_partial(pts_full, sdf_full, keep=args.keep, rng=rng)
 
-        # encoder: one forward pass
-        t = time.time()
-        z_enc = encode(enc, n_points, part_pts, part_sdf, device)
-        t_enc = time.time() - t
-        enc_pts, enc_mesh = recon_surface(model, z_enc, args.res, device)
+            # encoder: one forward pass
+            t = time.time()
+            z_enc = encode(enc, n_points, part_pts, part_sdf, device)
+            t_enc = time.time() - t
+            enc_pts, enc_mesh = recon_surface(model, z_enc, args.res, device)
 
-        # optimizer: full 2-phase production pipeline on a small point budget
-        idx = torch.randperm(part_pts.shape[0])[:args.n_samples]
-        opt_pts_in, opt_sdf_in = part_pts[idx], part_sdf[idx]
-        t = time.time()
-        z_opt, _ = optimize_latent_partial(
-            model, opt_pts_in, opt_sdf_in, config["latent_size"], mean_latent=mean_latent,
-            latent_init=latent_codes, top_k=top_k_reg, iters=args.phase1_iters, lr=1e-4,
-            lambda_reg=1e-3, clamp_val=1.0, latent_std=latent_std, scheduler_step=800,
-            scheduler_gamma=0.9, batch_inference_size=32768, multi_stage=False,
-            verbose=False, device=device)
-        z_opt, _ = optimize_latent_partial(
-            model, opt_pts_in, opt_sdf_in, config["latent_size"], latent_init=z_opt,
-            top_k=top_k_reg, iters=args.phase2_iters, lr=1e-5, lambda_reg=1e-5,
-            clamp_val=None, latent_std=latent_std, scheduler_step=800, scheduler_gamma=0.7,
-            batch_inference_size=32768, multi_stage=True, verbose=False, device=device)
-        t_opt = time.time() - t
-        opt_pts, opt_mesh = recon_surface(model, z_opt, args.res, device)
+            # optimizer: full 2-phase production pipeline on a small point budget
+            idx = torch.randperm(part_pts.shape[0])[:args.n_samples]
+            opt_pts_in, opt_sdf_in = part_pts[idx], part_sdf[idx]
+            t = time.time()
+            z_opt, _ = optimize_latent_partial(
+                model, opt_pts_in, opt_sdf_in, config["latent_size"], mean_latent=mean_latent,
+                latent_init=latent_codes, top_k=top_k_reg, iters=args.phase1_iters, lr=1e-4,
+                lambda_reg=1e-3, clamp_val=1.0, latent_std=latent_std, scheduler_step=800,
+                scheduler_gamma=0.9, batch_inference_size=32768, multi_stage=False,
+                verbose=False, device=device)
+            z_opt, _ = optimize_latent_partial(
+                model, opt_pts_in, opt_sdf_in, config["latent_size"], latent_init=z_opt,
+                top_k=top_k_reg, iters=args.phase2_iters, lr=1e-5, lambda_reg=1e-5,
+                clamp_val=None, latent_std=latent_std, scheduler_step=800, scheduler_gamma=0.7,
+                batch_inference_size=32768, multi_stage=True, verbose=False, device=device)
+            t_opt = time.time() - t
+            opt_pts, opt_mesh = recon_surface(model, z_opt, args.res, device)
 
-        c_enc = chamfer(gt_pts, enc_pts) if enc_pts is not None else float("nan")
-        c_opt = chamfer(gt_pts, opt_pts) if opt_pts is not None else float("nan")
-        enc_path = os.path.join(args.out_dir, f"shape_{int(i)}_encoder.vtk")
-        opt_path = os.path.join(args.out_dir, f"shape_{int(i)}_optimizer.vtk")
-        if enc_mesh is not None:
-            enc_mesh.save_mesh(enc_path)
-        if opt_mesh is not None:
-            opt_mesh.save_mesh(opt_path)
-        try:
-            surf_part = part_pts[part_sdf.abs().squeeze() < 0.01].cpu().numpy()
-            render(os.path.join(args.out_dir, f"shape_{int(i)}_compare.png"),
-                   gt_path, surf_part, enc_path, opt_path)
-        except Exception as e:
-            print(f"  render failed for {int(i)}: {e}")
+            c_enc = chamfer(gt_pts, enc_pts) if enc_pts is not None else float("nan")
+            c_opt = chamfer(gt_pts, opt_pts) if opt_pts is not None else float("nan")
+            enc_path = os.path.join(args.out_dir, f"shape_{int(i)}_encoder.vtk")
+            opt_path = os.path.join(args.out_dir, f"shape_{int(i)}_optimizer.vtk")
+            if enc_mesh is not None:
+                enc_mesh.save_mesh(enc_path)
+            if opt_mesh is not None:
+                opt_mesh.save_mesh(opt_path)
+            try:
+                surf_part = part_pts[part_sdf.abs().squeeze() < 0.01].cpu().numpy()
+                render(os.path.join(args.out_dir, f"shape_{int(i)}_compare.png"),
+                    gt_path, surf_part, enc_path, opt_path)
+            except Exception as e:
+                print(f"  render failed for {int(i)}: {e}")
 
-        rows.append(dict(shape=int(i), enc_chamfer=c_enc, opt_chamfer=c_opt,
-                         enc_time=t_enc, opt_time=t_opt, speedup=t_opt / max(t_enc, 1e-6)))
-        print(f"[{int(i)}] enc_cham {c_enc:.4f} ({t_enc:.3f}s)  "
-              f"opt_cham {c_opt:.4f} ({t_opt:.1f}s)  {t_opt / max(t_enc, 1e-6):.0f}x")
-
+            row = dict(shape=int(i), enc_chamfer=c_enc, opt_chamfer=c_opt,
+                    enc_time=t_enc, opt_time=t_opt, speedup=t_opt / max(t_enc, 1e-6))
+            rows.append(row)
+            w_csv.writerow(row)
+            f_csv.flush()
+            os.fsync(f_csv.fileno())
+            print(f"[{int(i)}] enc_cham {c_enc:.4f} ({t_enc:.3f}s)  "
+                f"opt_cham {c_opt:.4f} ({t_opt:.1f}s)  {t_opt / max(t_enc, 1e-6):.0f}x")
+    finally:
+        f_csv.close()
+    
     if not rows:
         print("No shapes evaluated.")
         return
-
-    csv_path = os.path.join(args.out_dir, "results.csv")
-    with open(csv_path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        w.writeheader(); w.writerows(rows)
 
     mean = lambda k: float(np.nanmean([r[k] for r in rows]))
     md = [
