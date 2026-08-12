@@ -4,95 +4,87 @@
 ## Introduction
 Use Fossil NSM Module in [3D Slicer](https://www.slicer.org/) to do shape completion on a fossil lizard vertebra using our trained model. 
 
+### Directory structure
+```
+<model_root> (e.g., run_v44)/   
+├── model_params_config.json   
+├── model/   
+│   └── 3000.pth   
+├── latent_codes/   
+│   └── 3000.pth   
+├── shape_completion/   
+│   ├── <results>_shape_completion.vtk   
+│   └── <results>_shape_completion_unc.vtk   
+└── classification/   
+    └── <mesh_name>/   
+        ├── <results>_classification.log   
+        ├── <results>_top5.csv   
+        ├── <results>_top5.json   
+        ├── all_latents.npy   
+        ├── fossil_latent.npy   
+        └── top5_indices.npy
+```
 
 ## Installation
-1. Open 3D Slicer
-2. Download the [nsm GitHub repo](https://github.com/3D-fossils-Haag/nsm/tree/main)   
-   Via git clone or download zip
-3. Open 3D Slicer
-4. Build the Fossil NSM Module *See Note   
-   Extension Wizard -> Select Extension -> path/to/your/nsm/FossilNsmModule
-5. Use Fossil NSM Module for shape completion or classification!
+1) Download this repository (git clone or ZIP).
+2) Slicer: `View > Extension Manager > Install Extensions > PyTorch`, then restart Slicer.
+3) Slicer: `Modules > PyTorch` → set Torch version to `2.5.1` → click `Install PyTorch`.
+4) Slicer: `Modules > Extension Wizard > Select Extension` → choose `<path-to-repo>/FossilNsmModule`.
+5) Slicer: `Modules > FossilNSM` to access Shape Completion and Classification.
+
+> Note: If Torch fails to import, confirm the Slicer PyTorch extension is installed and the version is set
+
+6. Use Fossil NSM Module for shape completion or classification!
    Modules -> FossilNSM -> Shape Completion -> Select your input files and click "Run Inference"
-   Modules -> FossilNSM -> Classification -> Select your input files and click "Classify Input Mesh"
+   Modules -> FossilNSM -> Classification -> Select your input files and click "Classify Input Mesh" 
 
-*Note: If you run into any errors importing torch, follow the steps below to ensure 3D Slicer uses the appropriate pytorch build.    
-3a. Install the PyTorch extension for 3D Slicer ([link to source code](https://github.com/fepegar/SlicerPyTorch))      
-      View -> Extension Manager -> Install Extensions -> PyTorch   
-3b. Restart 3D Slicer   
-3c. Specify pytorch version to be compatible with NSM      
-      Modules -> PyTorch     
-      Torch version requirement: ==2.5.1     
-      Click "Install PyTorch"   
-3d. Proceed to Step 4.   
-
-## Getting started
+## Quickstart
 To identify an unknown, partial fossil using our trained model, follow the steps below.  
-**A) Data Preprocessing**   
-   Preprocess your input fossils so they are smooth, clean, and aligned/scaled to the same proportions as the model training data. 
 
-**B) Shape Completion**   
-   Use shape completion to fill in missing structures of your fossil.
+### A) Preprocess Data   
+Preprocess your input fossils so they are smooth, clean, and aligned/scaled to the same proportions as the model training data. 
    
-**C) Classification**   
-   Classify your shape-completed fossil to species and vertebral position.
-   
-## A) Data Preprocessing
-See detailed steps for how to preprocess your fossil for inference on our [project wiki page](https://github.com/3D-fossils-Haag/nsm/wiki/Fossil-Preprocessing).  
+- Slicer: `Modules > Surface Toolkit` → smooth/simplify meshes to match training style.
+- Slicer: `Modules > Segmentation Editor`  → clean and hollow the mesh so incomplete parts can be filled in during shape completion.
+- Align and scale to the SSM template:
+  1. Inspect the SSM and landmarks in the 3D view.
+  2. Use `Modules > Markups` to place landmarks using the template.
+  3. Run the alignment script on your landmarked specimen:
+     - Script: [`align_model_to_ssm.py`](https://github.com/3D-fossils-Haag/nsm/blob/main/align_model_to_ssm.py)
 
-**1) Smoothing**    
-Ensure your fossil data is smooth and simplified to be comparable to our training data. This ensures that differences in shape are given priority, not differences in surface texture.
-1. Open 3D Slicer
-2. Modules -> Surface Toolkit
-3. Set parameters following screenshot below.
-   
-![Surface Toolkit Parameters](https://github.com/3D-fossils-Haag/nsm/blob/main/images/surftoolkit.png)
-*Screenshot of parameters used to preprocess meshes using the Surface Toolkit in 3D Slicer*
+- See detailed steps in the wiki: https://github.com/3D-fossils-Haag/nsm/wiki/Fossil-Preprocessing
+    
+### B) Run shape completion   
+Use shape completion to fill in missing structures of your fossil.
 
-**2) Cleaning**   
-Clean the mesh file so that it is hollow and cut away broken mesh regions so they can be filled in by shape completion.
-1. Open 3D Slicer
-2. Modules -> Segmentation Editor
-3. Use a combination of the Hollow tool and Scissors tool to prepare the mesh.
-
-![Segmentation Editor Parameters](https://github.com/3D-fossils-Haag/nsm/blob/main/images/12.png)
-
-**3) Align and Scale**   
-Align and scale your fossil to the statistical shape model (SSM) used to prepare our training data. This ensures differences in shape are given priority, not differences in position or scale.
-1. Open 3D Slicer
-2. Inspect SSM model and landmarks in the 3D viewer.
-3. Use the Markups Module to manually landmark your specimen following the template.
-4. Open your preferred code editor (e.g. VS Code)
-5. Use [align_model_to_ssm.py](https://github.com/3D-fossils-Haag/nsm/blob/main/align_model_to_ssm.py) to align your landmarked fossil to the SSM used for training data preprocessing.
-
-
-## Shape Completion
-The Shape Completion module completes a partial input mesh by optimizing or encoding (fast mode) it into the latent space. Select the model root containing all trained model files and optionally choose encoding/optimization settings and whether to visualize uncertainty. Click `Toggle Models` to toggle between the input fossil and shape completion results in the 3D viewer.
+- Slicer: `Modules > FossilNSM > Shape Completion`.
+- Select `<model-root>` (folder with trained model files) and your input mesh.
+- Choose optimization or enable Fast Mode (Encoder) if available.
+- Click `Run Inference`. Use `Toggle Models` to flip between input and completed shape.
 
 ![Fossil NSM Shape Completion](https://github.com/3D-fossils-Haag/nsm/blob/main/images/fossilnsmmodule.png)
 *Screenshot of shape completion results produced using Fossil NSM Module in 3D Slicer*
 
-## Classification
+### C) Classify the mesh
+Classify your shape-completed fossil to species and vertebral position.
 
-The Classification module classifies an input mesh by optimizing its latent code
-and ranking the five nearest training codes by cosine distance. 
+- Slicer: `Modules > FossilNSM > Classification`.
+- Select the same `<model-root>` and your input mesh.
+- Click `Classify Input Mesh`.
+- Results are saved as JSON in `<model-root>/shape_completion/classification/`.
+- To visualize top‑5 matches:
+  - In `Explore Meshes`, choose a local or Hugging Face Reference Mesh Library.
+  - Filenames must match the training mesh basenames in `model_params_config.json` (subdirectories allowed).
+  - Unavailable matches are reported explicitly.
 
-In the `Inference` tab, select the same model root used for completion, select an input mesh, then click
-**Classify Input Mesh**. The result table is saved as a small JSON file in
-`<model root>/shape_completion/classification/` and can be retained without
-copying the model or meshes. To visualize the top5 matches in `Explore Meshes`, select a local or Hugging Face *Reference Mesh Library*. Filenames
-must match the training mesh basenames stored in `model_params_config.json`.
-
-In the `Explore Meshes` tab, visualize the top5 closest meshes.
-
-In the `Explore Plots` tab, Interactive latent space plots of the encoded fossil, top5 matches, and training latents are shown using PCA, t-SNE, and UMAP.
-
+- In `Explore Plots`, interactively view PCA, t‑SNE, and UMAP projections of the latent space for the encoded fossil, top‑5 matches, and training latents.
+   
 ![Fossil NSM Classification](https://github.com/3D-fossils-Haag/nsm/blob/main/images/classification_screenshot.png)
 *Screenshot of classification results produced using Fossil NSM Module in 3D Slicer*
 
 ## Additional Information
 
-### Running Fossil NSM Module Tests
+### Running Tests
 To run the tests, execute the following command in your terminal:
 ```
 <path to your slicer install>/bin/PythonSlicer -m unittest test_shape_completion.py
@@ -141,3 +133,13 @@ Point the Slicer module's "Fast Mode (Encoder)" option at the resulting
 `encoder/checkpoints/encoder.pt`. Retrain the encoder whenever the underlying
 model/latent codes change, since it is specific to that decoder.
 
+## Links
+* Module folder: https://github.com/3D-fossils-Haag/nsm/tree/main/FossilNsmModule
+* Slicer PyTorch extension: https://github.com/fepegar/SlicerPyTorch
+* Preprocessing wiki: https://github.com/3D-fossils-Haag/nsm/wiki/Fossil-Preprocessing
+
+## Citation
+If you use this code or the trained models in your research, please cite this repository
+```
+Wolcott et al. 2026. “NSM: Fossil NSM Module for 3D Slicer.” GitHub repository. https://github.com/3D-fossils-Haag/nsm (accessed YYYY-MM-DD).
+```
