@@ -295,7 +295,6 @@ class FossilNsmLogic(ScriptedLoadableModuleLogic):
     @staticmethod
     def installDependenciesIfNeeded():
         USE_TINY3D = True
-
         if USE_TINY3D:
             try:
                 import tiny3d as o3d
@@ -363,3 +362,18 @@ class FossilNsmLogic(ScriptedLoadableModuleLogic):
             import vtk
         except ImportError:
             slicer.util.pip_install("vtk")
+        
+        try:
+            import huggingface_hub
+        except ImportError:
+            slicer.util.pip_install("huggingface_hub>=0.22")
+
+        try:
+            import trimesh
+        except ImportError:
+            slicer.util.pip_install("trimesh[easy]")
+
+        try:
+            import DracoPy
+        except ImportError:
+            slicer.util.pip_install("DracoPy")

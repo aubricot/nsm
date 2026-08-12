@@ -1,32 +1,48 @@
 import slicer
+from slicer.ScriptedLoadableModule import *
 from FossilNsmCommon import FossilNsmCommonWidget, FossilNsmLogic
 FossilNsmLogic.installDependenciesIfNeeded()
+
+import csv
 import glob
 import json
 import os
-import csv
+import struct
 import subprocess
 import sys
-import vtk
-import numpy as np
-import sklearn
-from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
-import umap
+
 import ctk
 import qt
+import vtk
+
+import numpy as np
+import sklearn
+import umap
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+
 try:
     import matplotlib
     import matplotlib.pyplot as plt
+    import plotly.graph_objects as go
 except ImportError:
     matplotlib = None
     plt = None
+    go = None
 
 try:
-    import plotly.graph_objects as go
+    from huggingface_hub import hf_hub_download
 except ImportError:
-    go = None
-from slicer.ScriptedLoadableModule import *
+    hf_hub_download = None
+
+try:
+    import DracoPy
+    import pyvista as pv
+    import trimesh
+except ImportError:
+    DracoPy = None
+    pv = None
+    trimesh = None
 
 FOSSIL_NSM_MESH_LAYOUT_ID = 702
 FOSSIL_NSM_PLOT_LAYOUT_ID = 703
@@ -66,6 +82,9 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self._cachedTop5Indices = None
         self._lastExportDir = None
         self._previousResultsBaseName = None
+        self._hfMode = False
+        self._hfCacheDir = None
+        self._hfToken = None
 
         FossilNsmLogic.installDependenciesIfNeeded()
 
@@ -111,12 +130,36 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         inferenceLayout.addWidget(inferenceBottomCollapsible)
         inferenceBottomLayout = qt.QFormLayout(inferenceBottomCollapsible)
 
+        self.refLocalRadio = qt.QRadioButton("Local directory")
+        self.refHfRadio    = qt.QRadioButton("Hugging Face dataset")
+        self.refLocalRadio.setChecked(True)
+        radioRow = qt.QHBoxLayout()
+        radioRow.addWidget(self.refLocalRadio)
+        radioRow.addWidget(self.refHfRadio)
+        inferenceBottomLayout.addRow("Mesh library source:", radioRow)
+
         self.referenceMeshesButton = qt.QPushButton("Select Reference Mesh Library")
         self.referenceMeshesButton.connect("clicked(bool)", self.onSelectReferenceMeshDirectory)
         self.referenceMeshesLabel = qt.QLabel("Optional: needed to visualize returned meshes")
         self.referenceMeshesLabel.setWordWrap(True)
-        inferenceBottomLayout.addRow("Reference Mesh Library:", self.referenceMeshesButton)
+        inferenceBottomLayout.addRow("Local directory:", self.referenceMeshesButton)
         inferenceBottomLayout.addRow("", self.referenceMeshesLabel)
+
+        self._hfWidget = qt.QWidget()
+        hfLayout = qt.QFormLayout(self._hfWidget)
+        hfLayout.setContentsMargins(0, 0, 0, 0)
+        self._hfRepoEdit = qt.QLineEdit()
+        self._hfRepoEdit.setPlaceholderText("username/dataset-repo")
+        hfLayout.addRow("HF dataset repo:", self._hfRepoEdit)
+        self._hfTokenEdit = qt.QLineEdit()
+        self._hfTokenEdit.setPlaceholderText("/path/to/hf_token.txt  (blank = use HF CLI login)")
+        hfLayout.addRow("HF token file:", self._hfTokenEdit)
+        self._hfCacheDirButton = ctk.ctkDirectoryButton()
+        hfLayout.addRow("Download cache dir:", self._hfCacheDirButton)
+        self._hfWidget.setVisible(False)
+        inferenceBottomLayout.addRow(self._hfWidget)
+        self.refLocalRadio.toggled.connect(lambda checked: (self._hfWidget.setVisible(not checked),
+                                                            setattr(self, "_hfMode", not checked)))
 
         self.classificationIterationsInput = qt.QLineEdit("1000")
         inferenceBottomLayout.addRow("Latent Optimization Iterations:", self.classificationIterationsInput)
@@ -308,10 +351,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.updateRunButton()
         self.layout.addStretch(1)
 
-    # ------------------------------------------------------------------ #
-    #  Inference helpers
-    # ------------------------------------------------------------------ #
-
     def onSelectReferenceMeshDirectory(self):
         path = qt.QFileDialog.getExistingDirectory(None, "Select Reference Mesh Library")
         if not path:
@@ -364,7 +403,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             base = base[: -len("_top5")]
         self._previousResultsBaseName = base
 
-        # Bulk summary (has a "results" list) --------------------------------
+        # Bulk summary (has a "results" list)
         if isinstance(data, dict) and "results" in data:
             self._bulkResults = data.get("results", [])
             self._bulkAllLatentsPath = data.get("all_latents")
@@ -381,7 +420,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             self.tabWidget.setCurrentIndex(self._batchTabIndex)
             return
 
-        # Single result (has a "matches" list) ------------------------------
+        # Single result (has a "matches" list) 
         if isinstance(data, dict) and "matches" in data:
             self.classificationMatches = data.get("matches", [])
             self._fossilPath = data.get("fossil_path") or data.get("fossil_name")
@@ -500,10 +539,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self._classificationTimer.timeout.connect(self._pollClassification)
         self._classificationTimer.start()
 
-    # ------------------------------------------------------------------ #
-    #  Tab switching
-    # ------------------------------------------------------------------ #
-
     def onTabChanged(self, index):
         print("[FossilNSM] onTabChanged index={}".format(index))
         if index == 0:  # Inference
@@ -519,10 +554,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             self._renderLatentSpacePlots()
         elif index == self._batchTabIndex:  # Batch Results
             self.setDefaultThreeDLayout()
-
-    # ------------------------------------------------------------------ #
-    #  Plot rendering
-    # ------------------------------------------------------------------ #
 
     def _renderLatentSpacePlots(self):
         print("[FossilNSM] _renderLatentSpacePlots called")
@@ -740,10 +771,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         
         print("[FossilNSM] chart node created: {}".format(title + "_chart"))
 
-    # ------------------------------------------------------------------ #
-    #  Layout helpers
-    # ------------------------------------------------------------------ #
-
     def _applyPlotLayout(self):
         print("[FossilNSM] _applyPlotLayout called")
         layoutDescription = """
@@ -872,10 +899,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             viewNode.SetBoxVisible(False)
             viewNode.SetAxisLabelsVisible(False)
 
-    # ------------------------------------------------------------------ #
-    #  Classification helpers
-    # ------------------------------------------------------------------ #
-
     def onAfterSceneCleared(self):
         self.classificationMatches = []
         self._plotsRenderedFor = None
@@ -972,14 +995,81 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.onLogMessage("Loaded batch result: " + result.get("input_name", ""), color="#4CAF50")
 
     def _referencePath(self, match):
-        if not self.referenceMeshDirectory:
-            return None
         name = match.get("mesh_name", "")
-        direct = os.path.join(self.referenceMeshDirectory, name)
-        if os.path.isfile(direct):
-            return direct
-        found = glob.glob(os.path.join(self.referenceMeshDirectory, "**", name), recursive=True)
-        return found[0] if found else None
+        if not name:
+            return None
+        if not self._hfMode:
+            if not self.referenceMeshDirectory:
+                return None
+            direct = os.path.join(self.referenceMeshDirectory, name)
+            if os.path.isfile(direct):
+                return direct
+            found = glob.glob(os.path.join(self.referenceMeshDirectory, "**", name), recursive=True)
+            return found[0] if found else None
+        repo_id   = self._hfRepoEdit.text.strip()
+        cache_dir = self._hfCacheDirButton.directory
+        if not repo_id or not cache_dir:
+            self.onLogMessage("HF mode: set dataset repo and download cache dir first.", color="orange")
+            return None
+        if self._hfToken is None:
+            token_path = self._hfTokenEdit.text.strip()
+            if token_path and os.path.isfile(token_path):
+                with open(token_path) as f:
+                    self._hfToken = f.read().strip()
+            else:
+                self._hfToken = ""  # fall back to HF CLI login
+
+        hf_name = os.path.splitext(name)[0] + "_draco.glb"     # e.g. "FMNH_12345.vtk"  →  "FMNH_12345_draco.glb"
+        vtk_path = os.path.join(cache_dir, os.path.splitext(name)[0] + ".vtk")
+        if os.path.isfile(vtk_path):
+            return vtk_path
+
+        try:
+            slicer.util.showStatusMessage("Downloading {} from HF...".format(hf_name))
+            slicer.app.processEvents()
+            glb_path = hf_hub_download(repo_id = repo_id, filename = hf_name, repo_type = "dataset",
+                                       token = self._hfToken or None, local_dir = cache_dir,)
+            slicer.util.showStatusMessage("")
+        except Exception as e:
+            slicer.util.showStatusMessage("")
+            self.onLogMessage("HF download failed for {}: {}".format(hf_name, e), color="red")
+            return None
+
+        try:
+            slicer.util.showStatusMessage("Converting {} to VTK...".format(hf_name))
+            slicer.app.processEvents()
+            with open(glb_path, "rb") as f:
+                raw = f.read()
+            magic, version, length = struct.unpack_from("<III", raw, 0)
+            json_length, json_type = struct.unpack_from("<II", raw, 12)
+            gltf = json.loads(raw[20: 20 + json_length])
+            bin_offset = 20 + json_length
+            bin_length, bin_type = struct.unpack_from("<II", raw, bin_offset)
+            bin_data = raw[bin_offset + 8: bin_offset + 8 + bin_length]
+            all_meshes = []
+            for mesh in gltf.get("meshes", []):
+                for prim in mesh.get("primitives", []):
+                    ext = prim.get("extensions", {}).get("KHR_draco_mesh_compression", {})
+                    bv_idx = ext.get("bufferView")
+                    if bv_idx is None:
+                        continue
+                    bv = gltf["bufferViews"][bv_idx]
+                    draco_bytes = bin_data[bv["byteOffset"]: bv["byteOffset"] + bv["byteLength"]]
+                    mesh_obj = DracoPy.decode(draco_bytes)
+                    tm = trimesh.Trimesh(vertices=mesh_obj.points, faces=mesh_obj.faces,
+                                         process=False)
+                    all_meshes.append(tm)
+            if not all_meshes:
+                raise ValueError("No Draco primitives found in {}".format(glb_path))
+            combined = trimesh.util.concatenate(all_meshes) if len(all_meshes) > 1 else all_meshes[0]
+            pv.wrap(combined).save(vtk_path)
+            slicer.util.showStatusMessage("")
+            return vtk_path
+
+        except Exception as e:
+            slicer.util.showStatusMessage("")
+            self.onLogMessage("GLB→VTK conversion failed for {}: {}".format(glb_path, e), color="red")
+            return None
 
     def _resolveFossilPath(self):
         if self.inputFilePath and os.path.isfile(self.inputFilePath):
@@ -987,7 +1077,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         if hasattr(self, "_fossilPath") and self._fossilPath:
             if os.path.isfile(self._fossilPath):
                 return self._fossilPath
-
         return None
 
     def _updateClassificationTable(self):
@@ -995,19 +1084,18 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         available = 0
         for row, match in enumerate(self.classificationMatches):
             meshPath = self._referencePath(match)
-            values = [
-                match["mesh_name"],
-                "{:.6f}".format(match["cosine_distance"]),
-                "Yes" if meshPath else "No - select matching library",
-            ]
+            if meshPath:
+                status = "Yes"
+            elif self._hfMode:
+                status = "No - set HF repo and cache dir"
+            else:
+                status = "No - select matching library"
+            values = [match["mesh_name"], "{:.6f}".format(match["cosine_distance"]), 
+                      "Yes" if meshPath else "No - select matching library",]
             for column, value in enumerate(values):
                 self.classificationTable.setItem(row, column, qt.QTableWidgetItem(value))
             if meshPath:
                 available += 1
-
-    # ------------------------------------------------------------------ #
-    #  Saving / exporting results (CSV, PNG, HTML)
-    # ------------------------------------------------------------------ #
 
     def _noteExportDir(self, directory):
         self._lastExportDir = directory
@@ -1105,24 +1193,8 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self._noteExportDir(os.path.dirname(csvPath))
         self.onLogMessage("Exported batch results to:\n{}".format(csvPath), color="#4CAF50")
 
-    def _ensurePlotLibs(self):
-        global matplotlib, plt, go
-
-        if matplotlib is None or plt is None:
-            slicer.util.pip_install("matplotlib")
-            import matplotlib
-            import matplotlib.pyplot as plt
-
-        if go is None:
-            slicer.util.pip_install("plotly")
-            import plotly.graph_objects as go
-
     def _coordsForPlotType(self, plotType):
-        return {
-            "PCA": self._pcaCoords,
-            "t-SNE": self._tsneCoords,
-            "UMAP": self._umapCoords,
-        }.get(plotType)
+        return {"PCA": self._pcaCoords, "t-SNE": self._tsneCoords,"UMAP": self._umapCoords,}.get(plotType)
 
     def _plotGroups(self, coords):
         fossilIdx = self._cachedFossilIdx
@@ -1225,7 +1297,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             slicer.util.warningDisplay(
                 "Open the Explore Plots tab first so the latent projection is computed.")
             return
-        self._ensurePlotLibs()
         outDir = self._resultsDir()
         if self.saveAllPlotsCheckbox.checked:
             plotTypes = ["PCA", "t-SNE", "UMAP"]
