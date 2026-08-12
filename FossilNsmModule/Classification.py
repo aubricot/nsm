@@ -55,7 +55,8 @@ class Classification(ScriptedLoadableModule):
         super().__init__(parent)
         self.parent.title = "Classification"
         self.parent.categories = ["FossilNSM"]
-        self.parent.contributors = ["Wolcott et all"]
+        self.parent.index = 30
+        self.parent.contributors = ["Wolcott et al"]
         self.parent.helpText = "Classify an input fossil mesh by ranking the nearest latent-space meshes."
 
 class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):

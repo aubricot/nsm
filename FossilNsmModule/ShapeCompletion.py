@@ -20,8 +20,9 @@ class ShapeCompletion(ScriptedLoadableModule):
         super().__init__(parent)
         self.parent.title = "Shape Completion"
         self.parent.categories = ["FossilNSM"]
-        self.parent.contributors = ["Wolcott et all"]
-        self.parent.helpText = "A shape completion module."
+        self.parent.index = 20
+        self.parent.contributors = ["Wolcott et al"]
+        self.parent.helpText = "Encode a partial vertebrae mesh and use NSM to complete the shape."
 
 class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
 
@@ -277,7 +278,9 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
         self._inputModelNode.GetDisplayNode().SetVisibility(False)
 
         base = os.path.splitext(os.path.basename(self.inputFilePath))[0]
-        self._resultPath = os.path.join(self.outputFolderPath, base + ".done")
+        outDir = os.path.join(self.outputFolderPath, base) 
+        os.makedirs(outDir, exist_ok=True)
+        self._resultPath = os.path.join(outDir, base + ".done")
         self.onLogMessage("Result path: " + self._resultPath)
 
         # Path to the worker script (lives next to this module)
@@ -298,7 +301,7 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
             "--model", self.modelFilePath,
             "--latent_codes", self.latentCodesFilePath,
             "--input_mesh", self.inputFilePath,
-            "--output_folder", self.outputFolderPath,
+            "--output_folder", outDir,
             # Optimization settings
             "--n_samples", self.nSamplesOptInput.text,
             "--phase1_iters", self.phase1ItersInput.text,
@@ -449,7 +452,6 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
             self.toggleModelsButton.setText("Show Shape Completed Model")
 
     def _pollSubprocess(self):
-        # Read any new lines from the log file (never blocks)
         try:
             with open(self._logFilePath, "r", errors="replace") as f:
                 f.seek(self._logReadPos)
@@ -464,7 +466,6 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
 
         retcode = self._process.poll()
         if retcode is not None:
-            # Process finished
             self._pollTimer.stop()
             self._logFile.close()
             self.progressBar.setVisible(False)
@@ -473,6 +474,12 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
             if retcode == 0 and os.path.exists(self._resultPath):
                 with open(self._resultPath) as f:
                     self.outputPath = f.read().strip()
+                if not os.path.isabs(self.outputPath):
+                    self.outputPath = os.path.join(os.path.dirname(self._resultPath), self.outputPath)
+                try:
+                    os.remove(self._resultPath)
+                except OSError:
+                    pass
                 self.onLogMessage(f"\nInference complete. \n\nOutput saved to: {self.outputPath}", color = "#4CAF50")
                 outputNode = slicer.util.loadModel(self.outputPath)
                 outputNode.SetName("Predicted Mesh")
