@@ -1,10 +1,10 @@
-# Introduction
+## Introduction
 This code uses generative deep learning models to understand the skeletal anatomy of lizards and some snakes (Squamata). This code is forked and modified from [gattia/NSM](https://github.com/gattia/NSM) following the terms of the [GNU Affero GPL 3.0 License](https://www.gnu.org/licenses/agpl-3.0.en.html). See [Original NSM Documentation](http://anthonygattiphd.com/NSM/). 
 
 ![Isomap GIF](https://github.com/aubricot/nsm/blob/main/images/isomap_4way_splitscreen_C-T-L_avg.gif)
 *Figure 1: Traversing an isomap of the NSM trained model latent space using travelling salesman and k-nearest neighbors. Video animation made using [isomap_video.py](https://github.com/aubricot/nsm/blob/main/isomap_video.py)*
 
-# Installation
+## Installation
 
 ```bash
 # Create and activate conda environment
@@ -24,10 +24,10 @@ pip install -e .
 
 ```
 
-# Usage
+## Usage
 Please refer to the project [Wiki](https://github.com/3D-fossils-Haag/nsm/wiki) for detailed instructions on using NSM.
 
-## Demos
+### Demos
 Check out our demos to build NSM fully in the Google Colab runtime environment and interactively evaluate our tools with demo data in under 10 minutes, no need to connect to your Google Drive!
 
 :arrow_right: :lizard: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aubricot/nsm/blob/main/demos/classification_demo.ipynb) Click here to try out classification of unknown fossils.
@@ -35,7 +35,7 @@ Check out our demos to build NSM fully in the Google Colab runtime environment a
 
 :arrow_right: :lizard: [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aubricot/nsm/blob/main/demos/shape_completion_demo.ipynb) Click here to try out shape completion for partial fossils.
 
-## Training
+### Training
 Update sections of [train_model.py]() commented with # TO DO: to update PROJECT_NAME, ENTITY_NAME, RUN_NAME, folder_vtk, N_TRAIN, N_TEST, N_VAL. These variables point to where your data was collected, where it is saved, and where outputs should go. Adjust model training hyperparameters in [vertebrae_config.json](). See python script and config files for details and save before running using commands below. 
 ```
 conda activate NSM
@@ -43,7 +43,7 @@ cd NSM/nsm
 python train_model.py
 ```
 
-## Model Loading
+### Model Loading
 
 NSM provides a convenient model loader that simplifies loading pre-trained Neural Shape Models. For **trained models**, you'll have:
 
@@ -89,7 +89,7 @@ model.to(device)
 model.eval()
 ```
 
-## Create Meshes
+### Create Meshes
 
 After loading a trained model, you can generate meshes from manipulated/new latent vectors. The example below generates the mean mesh shape based on model training data.
 
@@ -125,6 +125,12 @@ else:
 mesh_pv.save(output_path)
 ```
 
-# License
+## License
 
 This code is forked and modified from [https://github.com/gattia/NSM](https://github.com/gattia/NSM) following the terms of the [GNU Affero GPL 3.0 License](https://www.gnu.org/licenses/agpl-3.0.en.html) and [NSM License](https://github.com/gattia/nsm/blob/main/LICENSE). See [NOTICE](https://github.com/3D-fossils-Haag/nsm/blob/main/NOTICE).
+
+## Citation
+If you use this code or the trained models in your research, please cite this repository
+```
+Wolcott et al. 2026. “Squamate NSM” GitHub repository. https://github.com/3D-fossils-Haag/nsm (accessed YYYY-MM-DD).
+```
