@@ -55,7 +55,7 @@ def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_p
          data_weight=1.0, latent_weight=1.0, mc_samples=2000, n_triangles=5000,
          n_samples=240, phase1_iters=3000, phase1_lr=1e-4, phase1_lambda_reg=1e-3,
          phase2_iters=8000, phase2_lr=1e-5, phase2_lambda_reg=1e-5, n_pts_per_axis=256,
-         fast_mode=False, encoder_ckpt=None, refine_iters=0):
+         fast_mode=False, encoder_ckpt=None, refine_iters=0, refine_lr=None, refine_lambda_reg=None):
     USE_TINY3D = True  # Set this flag based on Slicer environment
 
     # Dynamically import open3d/tiny3d depending on USE_TINY3D
@@ -177,11 +177,12 @@ def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_p
             print("\n-----Fast mode: encoding latent (single forward pass)----\n")
             latent_partial = encoder_latent(encoder_ckpt, points_full, sdf_full, device)
             if refine_iters > 0:
-                # MetaSDF-style: encoder output as a learned init + a few refine steps.
-                print(f"Refining encoder latent for {refine_iters} iters...")
+                lr = refine_lr if refine_lr is not None else phase2_lr
+                lam = refine_lambda_reg if refine_lambda_reg is not None else phase2_lambda_reg
+                print(f"Refining encoder latent for {refine_iters} iters (lr={lr}, lambda={lam})...")
                 latent_partial, _ = optimize_latent_partial(model, points.squeeze(), sdf_vals, config['latent_size'], latent_init=latent_partial, top_k=top_k_reg,
-                                                             iters=refine_iters, lr=phase2_lr, lambda_reg=phase2_lambda_reg, clamp_val=None, latent_std=latent_std, scheduler_step=800, scheduler_gamma=0.7,
-                                                             batch_inference_size=32768, multi_stage=True, device=device)
+                                                            iters=refine_iters, lr=lr, lambda_reg=lam, clamp_val=None, latent_std=latent_std, scheduler_step=800, 
+                                                            scheduler_gamma=0.7, batch_inference_size=32768, multi_stage=True, device=device)
             print("\nEncoded novel mesh into latent space!\n")
         else:
             # Optimize latents
@@ -337,6 +338,8 @@ if __name__ == "__main__":
                         default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                              'encoder', 'checkpoints', 'encoder.pt'))
     parser.add_argument('--refine_iters', type=int, default=0)
+    parser.add_argument('--refine_lr', type=float, default=None)
+    parser.add_argument('--refine_lambda_reg', type=float, default=None)
 
     # Check if we are using positional args or argparse format
     if len(sys.argv) == 6 and not sys.argv[1].startswith('-'):
@@ -374,5 +377,7 @@ if __name__ == "__main__":
             n_pts_per_axis=args.n_pts_per_axis,
             fast_mode=args.fast_mode,
             encoder_ckpt=args.encoder_ckpt,
-            refine_iters=args.refine_iters
+            refine_iters=args.refine_iters,
+            refine_lr=args.refine_lr,
+            refine_lambda_reg=args.refine_lambda_reg,
         )
