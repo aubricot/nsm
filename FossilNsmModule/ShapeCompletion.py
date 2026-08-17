@@ -45,9 +45,12 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
 
         self.encoderCkptInput = qt.QLineEdit("encoder/checkpoints/encoder.pt")
         fastLayout.addRow("Encoder Checkpoint:", self.encoderCkptInput)
-
         self.refineItersInput = qt.QLineEdit("0")
         fastLayout.addRow("Refine Iterations:", self.refineItersInput)
+        self.refineLrInput = qt.QLineEdit("1e-5")
+        fastLayout.addRow("Refine Learning Rate:", self.refineLrInput)
+        self.refineLambdaInput = qt.QLineEdit("1e-5")
+        fastLayout.addRow("Refine Lambda Reg:", self.refineLambdaInput)
 
         # Optimization Settings Collapsible Layout
         optimCollapsible = ctk.ctkCollapsibleButton()
@@ -315,8 +318,11 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
         if self.fastModeCheckbox.isChecked():
             cmd.append("--fast_mode")
             cmd.extend(["--refine_iters", self.refineItersInput.text])
+            cmd.extend(["--refine_lr", self.refineLrInput.text])
+            cmd.extend(["--refine_lambda_reg", self.refineLambdaInput.text])
             if self.encoderCkptInput.text.strip():
                 cmd.extend(["--encoder_ckpt", self.encoderCkptInput.text.strip()])
+                
         if self.estimateUncertaintyCheckbox.isChecked():
             cmd.append("--estimate_uncertainty")
             cmd.extend(["--propagation_mode", self.propagationModeCombobox.currentText])
