@@ -7,6 +7,7 @@ from scipy.spatial import cKDTree
 import re
 import torch
 import time
+import pyvista as pv
 from NSM.optimization import normalize_mesh, get_norm_params, get_top_k_pcs, build_sdf_dataset, encode_latent, reconstruct_mesh_from_latent
 from NSM.helper_funcs import convert_ply_to_vtk
 
