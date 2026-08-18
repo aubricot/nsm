@@ -1,5 +1,6 @@
 # Utility functions for fine-tuning optimization of novel meshes in trained models
 
+import os
 import numpy as np
 import json
 from sklearn.decomposition import PCA
@@ -15,6 +16,8 @@ try:
     import open3d as o3d
 except:
     print("Error importing open3d")
+
+from encoder.pointnet_encoder import PointNetEncoder
 
 # Initialize latent near PCA offset mean
 def pca_initialize_latent(mean_latent, latent_codes, top_k=10):
@@ -377,6 +380,10 @@ def build_sdf_dataset(mesh_fpath, config, n_samples=240, device='cuda'):
     points = sample_dict['xyz'].to(device) # shape: [N, 3]
     sdf_vals = sample_dict['gt_sdf'].to(device).reshape(-1, 1)  # shape: [N, 1]
 
+    # Downsample or keep full dataset
+    if n_samples is None or n_samples >= points.size(0):
+        return points, sdf_vals, sdf_dataset, sample_dict
+
     # Use a subset of the points for optizimation/reconstruction
     indices = torch.randperm(points.size(0))[:n_samples] # Generate n_samples random indices
 
@@ -429,3 +436,24 @@ def reconstruct_mesh_from_latent(mesh_fpath, model, latent_vec, config, device='
                                 verbose=True, device=device, scale_to_original_mesh=False) 
         
     return mesh_out
+
+def encode_latent_pointnet(encoder_ckpt, points_full, sdf_full, device, surf_thresh=0.01):
+    if not os.path.isabs(encoder_ckpt):
+        encoder_ckpt = os.path.join(os.path.dirname(os.path.abspath(__file__)), encoder_ckpt)
+    ckpt = torch.load(encoder_ckpt, map_location=device)
+    enc = PointNetEncoder(latent_size=ckpt["latent_size"]).to(device)
+    enc.load_state_dict(ckpt["model"])
+    enc.eval()
+    n_points = ckpt["n_points"]
+    abs_sdf = sdf_full.abs().squeeze()
+    surf = points_full[abs_sdf < surf_thresh]
+    if surf.shape[0] < 32:
+        k = min(n_points, points_full.shape[0])
+        idx = torch.topk(abs_sdf, k, largest=False).indices
+        surf = points_full[idx]
+    n = surf.shape[0]
+    sel = np.random.choice(n, n_points, replace=n < n_points)
+    surf = surf[sel]
+    with torch.no_grad():
+        z = enc(surf.unsqueeze(0).to(device))
+    return z
