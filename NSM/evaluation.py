@@ -5,6 +5,8 @@ import os
 from scipy.spatial import cKDTree
 import re
 import torch
+import time
+import random
 
 # Strip _partial to match partial_mesh_path and ground_truth_path pairs
 def strip_partial_mesh_name(path):
@@ -80,8 +82,8 @@ def load_best_cfg_from_csv(csv_path, device):
                 "lambda1":     float(best_row["lambda1"]),
                 "lambda2":     float(best_row["lambda2"]),
                 "clamp1":      best_row["clamp1"],
-                "clamp2":      best_row["clamp2"],
-                "latent_std":  best_row["latent_std"],
+                "clamp2":      clamp2,
+                "latent_std":  latent_std,
                 "sched_step":  int(best_row["sched_step"]),
                 "sched_gamma1": float(best_row["sched_gamma1"]),
                 "sched_gamma2": float(best_row["sched_gamma2"]),
@@ -90,3 +92,94 @@ def load_best_cfg_from_csv(csv_path, device):
 
     print(f"\nLoaded best_cfg from CSV (min mean_cd = {best_row['mean_cd']:.4f}):")
     return best_cfg
+
+# Random search on a small validation subset to pick best cfg
+def grid_search(pairs, model, config, mean_latent, latent_codes, device, out_dir, n_trials=15, valN=30, log_path_csv=None, log_path_json=None):
+    # Set up directory for fine-tuning experiemnts
+    os.makedirs(out_dir, exist_ok=True)
+    val_subset = random.sample(pairs, min(valN, len(pairs)))
+    best = {'score': float('inf'), 'cfg': None}
+    rows = []
+    # Define how many PCs describe X% of variance
+    _, k95 = get_top_k_pcs(latent_codes, threshold=0.95)
+    _, k90 = get_top_k_pcs(latent_codes, threshold=0.90)
+    _, k99 = get_top_k_pcs(latent_codes, threshold=0.99)
+    latent_std = latent_codes.std().mean()
+
+    # Randomly pick optimization parameters from provided values
+    for t in range(n_trials):
+        trial_cfg = {
+            'top_k': random.choice([k95, k99]),
+            'iters1': random.choice([3000, 5000]),
+            'iters2': random.choice([6000, 8000]),
+            'lr1': random.choice([1e-4, 1e-3]),
+            'lr2': random.choice([1e-5, 1e-4]),
+            'lambda1': random.choice([1e-6, 1e-3, 1e-2]),
+            'lambda2': random.choice([1e-7, 1e-5, 1e-3]),
+            'clamp1': 1,
+            'clamp2': random.choice([None, 1]),
+            'latent_std': latent_std,
+            'sched_step': random.choice([500, 800]),
+            'sched_gamma1': random.choice([0.7, 0.9]),
+            'sched_gamma2': random.choice([0.5, 0.7, 0.9]),
+            'batch_infer': random.choice([32768]),
+            'gridN': random.choice([128, 256]),}
+        scores = []
+        times = []
+        # Set up directory for each trial
+        trial_dir = os.path.join(out_dir, f"trial_{t:02d}")
+        os.makedirs(trial_dir, exist_ok=True)
+        # Run trial on randomly chosen config params and log chamfer score
+        for i, (pred_path, gt_path) in enumerate(val_subset):
+            start = time.time()
+            if '.ply' in pred_path:
+                _, pred_path = convert_ply_to_vtk(pred_path, save=True)
+            # Build SDF dataset
+            points, sdf_vals, sdf_dataset, sample_dict = build_sdf_dataset(pred_path, config, n_samples=240)
+            # Encode latent via 2 stage optimization (auto-decoder framework)
+            latent_opt = encode_latent(decoder=model, points=points.squeeze(), sdf_vals=sdf_vals, latent_dim=latent_codes.shape[1], 
+                               mean_latent=mean_latent, latent_codes=latent_codes, top_k_reg=trial_cfg['top_k'], latent_std=trial_cfg['latent_std'],
+                               iters1=trial_cfg['iters1'], iters2=trial_cfg['iters2'], lr1=trial_cfg['lr1'], lr2=trial_cfg['lr2'], 
+                               lambda_reg1=trial_cfg['lambda1'], lambda_reg2=trial_cfg['lambda2'], clamp_val1=trial_cfg['clamp1'], clamp_val2=trial_cfg['clamp2'], 
+                               scheduler_step1=trial_cfg['sched_step'], scheduler_step2=trial_cfg['sched_step'], scheduler_gamma1=trial_cfg['sched_gamma1'],
+                               scheduler_gamma2=trial_cfg['sched_gamma2'], batch_inference_size=trial_cfg['batch_infer']) 
+            # Reconstruction mesh from latent
+            mesh_out = reconstruct_mesh_from_latent(pred_path, model, latent_opt, trial_cfg)
+            
+            # Normalize and scale output using model config training params
+            center, max_radius = get_norm_params(sdf_dataset, sample_dict, pred_path)
+            mesh_pv = normalize_mesh(mesh_out, pred_path, config, center, max_radius)
+            
+            # Save to file
+            mesh_pv = mesh_pv.clean().triangulate()
+            for arr in ['RegionId', 'vtkOriginalCellIds']:
+                if arr in mesh_pv.cell_data.keys():
+                    mesh_pv.cell_data.remove(arr)
+            base_name = os.path.splitext(os.path.basename(pred_path))[0]
+            new_filename = f"{base_name}_completed.vtk"
+            completed_path = os.path.join(trial_dir, new_filename)
+            mesh_pv.save(completed_path)
+
+            # Calculate chamfer distance between predicted mesh and ground truth
+            compl = pv.read(completed_path).triangulate().extract_surface(algorithm=None)
+            gt = pv.read(gt_path).triangulate().extract_surface(algorithm=None)
+            cd = chamfer_distance(compl, gt, n_samples=5000)
+            mesh_time = time.time() - start
+            scores.append(cd)
+            times.append(mesh_time)
+
+        # Get mean chamfer for all meshes from trial
+        mean_cd = float(np.mean(scores))
+        if mean_cd < best['score']:
+            best = {'score': mean_cd, 'cfg': trial_cfg}
+        # Append the current trial's results to the list
+        mean_time = float(np.mean(times))
+        rows.append({'trial': t, 'mean_cd': mean_cd, 'mean_time': mean_time, **trial_cfg})
+        # Save results to csv
+        if log_path_csv is not None:
+            pd.DataFrame(rows).to_csv(log_path_csv, index=False)
+    print(f"Best cfg: {best['cfg']} (mean Chamfer={best['score']:.4f})")
+    # Save logs
+    if log_path_csv:
+        print(f"Finished. Final trial log with all trials saved to {log_path_csv}")
+    return best['cfg'], rows
