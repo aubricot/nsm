@@ -333,11 +333,7 @@ class ShapeCompletionWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget)
             cmd.extend(["--n_triangles", self.nTrianglesInput.text])
             cmd.extend(["--mc_samples", self.nSamplesInput.text])
 
-        self._process = subprocess.Popen(
-            cmd,
-            stdout=self._logFile,
-            stderr=subprocess.STDOUT,
-        )
+        self._process = subprocess.Popen(cmd, stdout=self._logFile, stderr=subprocess.STDOUT)
 
         # Poll every 500 ms instead of blocking
         self._pollTimer = qt.QTimer()
