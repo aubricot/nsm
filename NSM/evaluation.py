@@ -1,12 +1,14 @@
 # Utility functions for model evaluation
 import pandas as pd
 import numpy as np
+import random
 import os
 from scipy.spatial import cKDTree
 import re
 import torch
 import time
-import random
+from NSM.optimization import normalize_mesh, get_norm_params, get_top_k_pcs, build_sdf_dataset, encode_latent, reconstruct_mesh_from_latent
+from NSM.helper_funcs import convert_ply_to_vtk
 
 # Strip _partial to match partial_mesh_path and ground_truth_path pairs
 def strip_partial_mesh_name(path):
