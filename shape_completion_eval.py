@@ -75,14 +75,11 @@ pairs = build_partial_gt_mesh_pairs(partial_mesh_summary, mesh_names, split_key)
 # Loop through meshes using best parameters from grid search
 summary_log = []
 inf_subset = random.sample(pairs, N_INF) if N_INF != "all" else pairs
-print(f"Using {len(inf_subset)} (partial, ground_truth) pairs for inference")
-
-for pm_path, gt_path in inf_subset:    
+for i, (pm_path, gt_path) in enumerate(inf_subset, start=1):    
     try:
         print(f"\033[32m\n=== Processing {os.path.basename(pm_path)} ===\033[0m")
-        # Make a new dir to save predictions
+        print(f"\033[32m\n=== {i} of {len(inf_subset)} ===\033[0m")
         vert_fname = pm_path
-
         # Convert plys to vtks
         if '.ply' in vert_fname:
             ply_fname = vert_fname
