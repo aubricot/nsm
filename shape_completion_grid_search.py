@@ -26,9 +26,9 @@ CKPT = '2500' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH =  TRAIN_DIR + '/latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = TRAIN_DIR +  '/model' + '/' + CKPT + '.pth'
 val_sum_fn = TRAIN_DIR + "/shape_completion/meshes/" + "partial_meshing_summary.json" # TO DO: Choose path to partial_meshing_summary.json from (generated using create_partial_meshes.py)
-N_TRIALS = 1   # TO DO: Choose the number of trials for the grid search
-N_TRIAL_INF = 1   # TO DO: Choose the number of meshes to use for inference in each grid search trial
-N_FINAL_INF = 2  # TO DO: Choose how many meshes to use for final inference with best config reconstruction parameters from grid search
+N_TRIALS = 15   # TO DO: Choose the number of trials for the grid search
+N_TRIAL_INF = 30   # TO DO: Choose the number of meshes to use for inference in each grid search trial
+N_FINAL_INF = 50   # TO DO: Choose how many meshes to use for final inference with best config reconstruction parameters from grid search
 split = "val"  # TO DO: Which dataset split to use - "train", "val", or "test"
 
 # Load model config
