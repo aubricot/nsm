@@ -125,7 +125,7 @@ def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_p
         # Normalize and scale output using model config training params
         center, max_radius = get_norm_params(sdf_dataset, sample_dict, vert_fname)
         mesh_pv = normalize_mesh(mesh_out, vert_fname, config, center, max_radius)
-        mesh_pv = mesh_pv.clean().triangulate().extract_surface(algorithm=None)
+        mesh_pv = mesh_pv.clean().triangulate()
         for arr in ['RegionId', 'vtkOriginalCellIds']:
             if arr in mesh_pv.cell_data.keys():
                 mesh_pv.cell_data.remove(arr)
