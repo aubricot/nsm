@@ -20,27 +20,31 @@ import re
 import random
 import open3d as o3d
 from NSM.helper_funcs import NumpyTransform, load_config, load_model_and_latents, convert_ply_to_vtk, fixed_point_coords, safe_load_mesh_scalars, find_shape_completion_files 
-from NSM.optimization import pca_initialize_latent, get_top_k_pcs, optimize_latent_partial, normalize_mesh, get_norm_params
+from NSM.optimization import pca_initialize_latent, get_top_k_pcs, optimize_latent_partial, normalize_mesh, get_norm_params, encode_latent, reconstruct_mesh_from_latent, build_sdf_dataset
+from NSM.evaluation import load_best_cfg_from_csv
 # Monkey Patch into pymskt.mesh.meshes.Mesh
 meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
 meshes.Mesh.point_coords = property(fixed_point_coords)
 
 # Define training directory
-TRAIN_DIR = "run_v57" # TO DO: Choose training directory containing model ckpt and latent codes
+TRAIN_DIR = "run_v72" # TO DO: Choose training directory containing model ckpt and latent codes
 os.chdir(TRAIN_DIR)
-CKPT = '3000' # TO DO: Choose the ckpt value you want to analyze results for
+CKPT = '2500' # TO DO: Choose the ckpt value you want to analyze results for
 LC_PATH = 'latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = 'model' + '/' + CKPT + '.pth'
+N_INF = 5  # TO DO: Choose how many meshes to use for inference (or use "all" to run for all)
+BEST_CFG_CSV = TRAIN_DIR + "/shape_completion/fine_tuning/trial_scores.csv"  # TO DO: set to your CSV path; produced by shape_completion_grid_search.py
+LOAD_BEST_CFG_FROM_CSV = False
+mesh_dir = "fossils/models_smooth_hollow/aligned" # TO DO: Define your mesh directory
+
 
 # Load model config
 config = load_config(config_path='model_params_config.json')
 device = config.get("device", "cuda:0")
 
 # Select matching paths of partial meshes for shape completion
-mesh_dir = "fossils/models_smooth_hollow/aligned"
 mesh_list = os.listdir(mesh_dir)
-mesh_list = [os.path.join(mesh_dir, f) for f in random.sample(mesh_list, 5)]
-#mesh_list = [os.path.join(mesh_dir, f) for f in mesh_list]
+mesh_list = [os.path.join(mesh_dir, f) for f in mesh_list]
 
 # Load model and latent codes
 model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, config, device)
@@ -48,8 +52,30 @@ mean_latent = latent_codes.mean(dim=0, keepdim=True)
 latent_std = latent_codes.std().mean()
 _, top_k_reg = get_top_k_pcs(latent_codes, threshold=0.99)
 
+# Load best optimization config from shape_completion_grid_search.py (or manually enter)
+if LOAD_BEST_CFG_FROM_CSV:
+    best_cfg = load_best_cfg_from_csv(BEST_CFG_CSV, device)
+
+else:           # TO DO: Manually enter chosen vals
+    best_cfg = {"top_k": 466,
+                "iters1": 5000,
+                "iters2": 8000,
+                "lr1": 1e-4,
+                "lr2": 1e-4,
+                "lambda1": 1e-2,
+                "lambda2": 1e-7,
+                "clamp1": 1,
+                "clamp2": None,
+                "latent_std": torch.tensor(0.4401),
+                "sched_step": 800,
+                "sched_gamma1": 0.7,
+                "sched_gamma2": 0.9,
+                "batch_infer": 32768,
+                "gridN": 256}
+
 # Loop through meshes
 summary_log = []
+inf_subset = random.sample(mesh_list, N_INF) if N_INF != "all" else mesh_list
 for i, vert_fname in enumerate(mesh_list):    
     print(f"\033[32m\n=== Processing {os.path.basename(vert_fname)} ===\033[0m")
     print(f"\033[32m\n=== Mesh {i+1} / {len(mesh_list)} ===\033[0m")
@@ -63,79 +89,27 @@ for i, vert_fname in enumerate(mesh_list):
         ply_fname = vert_fname
         mesh, vert_fname = convert_ply_to_vtk(ply_fname, save=True)
 
-    # Setup your dataset with just one mesh
-    sdf_dataset = SDFSamples(
-        list_mesh_paths=[vert_fname],
-        multiprocessing=False,
-        subsample=config["samples_per_object_per_batch"],
-        print_filename=True,
-        n_pts=config["n_pts_per_object"],
-        p_near_surface=config['percent_near_surface'],
-        p_further_from_surface=config['percent_further_from_surface'],
-        sigma_near=config['sigma_near'],
-        sigma_far=config['sigma_far'],
-        rand_function=config['random_function'], 
-        center_pts=config['center_pts'],
-        norm_pts=config['normalize_pts'],
-        scale_method=config['scale_method'],
-        scale_jointly=config['scale_jointly'],
-        reference_mesh=None,
-        verbose=config['verbose'],
-        save_cache=config['cache'],
-        equal_pos_neg=config['equal_pos_neg'],
-        fix_mesh=config['fix_mesh'])
-
-    # Get the point/SDF data
-    print("\n-----Setting up dataset-----\n")
-    sample_dict, _ = sdf_dataset[0]
-    points = sample_dict['xyz'].to(device) # shape: [N, 3]
-    sdf_vals = sample_dict['gt_sdf'].to(device)  # shape: [N, 1]
-
-    # Use a subset of the points for optizimation/reconstruction
-    n_samples = 240 # TO DO: Define how many points to sample
-    indices = torch.randperm(points.size(0))[:n_samples] # Generate n_samples random indices
+    # Build the SDF dataset
+    points, sdf_vals, sdf_dataset, sample_dict = build_sdf_dataset(vert_fname, config, n_samples=240)
     
-    # Downsample the points and SDF values
-    points = points[indices]
-    points = points.squeeze()
-    sdf_vals = sdf_vals[indices]
-    sdf_vals = sdf_vals.reshape(-1, 1)
+    # Encode latent via 2 stage optimization (auto-decoder framework)
+    latent_opt = encode_latent(decoder=model, points=points.squeeze(), sdf_vals=sdf_vals, latent_dim=latent_codes.shape[1], 
+                                mean_latent=mean_latent, latent_codes=latent_codes, top_k_reg=top_k_reg, latent_std=best_cfg['latent_std'],
+                                iters1=best_cfg['iters1'], iters2=best_cfg['iters2'], lr1=best_cfg['lr1'], lr2=best_cfg['lr2'], 
+                                lambda_reg1=best_cfg['lambda1'], lambda_reg2=best_cfg['lambda2'], clamp_val1=best_cfg['clamp1'], clamp_val2=best_cfg['clamp2'], 
+                                scheduler_step1=best_cfg['sched_step'], scheduler_step2=best_cfg['sched_step'], scheduler_gamma1=best_cfg['sched_gamma1'],
+                                scheduler_gamma2=best_cfg['sched_gamma2'], batch_inference_size=best_cfg['batch_infer']) 
 
-    # Optimize latents
-    print("\n-----Optimizing latents----\n")
-    # Phase 1 - Coarse Optimization - get a global shape in the right area of latent space (close to target specimen (far enough from mean); but not so far from mean that it is noisy or unrealistic)
-    latent_partial, _ = optimize_latent_partial(model, points.squeeze(), sdf_vals, config['latent_size'], mean_latent=mean_latent, latent_init=latent_codes, top_k=top_k_reg, 
-                                                       iters=3000, lr=1e-4, lambda_reg=1e-3, clamp_val=1.0, latent_std=latent_std, scheduler_step=800, scheduler_gamma=0.9, 
-                                                       batch_inference_size=32768, multi_stage=False, device=device)
-    # Phase 2 - Refinement - emphasis on local SDF samples and surface consistency to refine target specimen shape
-    latent_partial, _ = optimize_latent_partial(model, points.squeeze(), sdf_vals, config['latent_size'], latent_init=latent_partial, top_k=top_k_reg, 
-                                                        iters=8000, lr=1e-5, lambda_reg=1e-5, clamp_val=None, latent_std=latent_std, scheduler_step=800, scheduler_gamma=0.7, 
-                                                        batch_inference_size=32768, multi_stage=True, device=device) # True because second stage using already initialized latent
-    print("\nTranslated novel mesh into latent space!\n")
     
-    # Reconstruction parameters
-    recon_grid_origin = 1.0
-    n_pts_per_axis = 256 # TO DO: Adjust resolution
-    voxel_origin = (-recon_grid_origin, -recon_grid_origin, -recon_grid_origin)
-    voxel_size = (recon_grid_origin * 2) / (n_pts_per_axis - 1)
-    offset = np.array([0.0, 0.0, 0.0])
-    scale = 1.0
-    icp_transform = NumpyTransform(np.eye(4))
-    objects = 1
+    # Reconstruction mesh from latent
+    mesh_out = reconstruct_mesh_from_latent(vert_fname, model, latent_opt, best_cfg)
 
-    # Reconstruct the novel mesh
-    with torch.no_grad():
-        mesh_out = create_mesh(decoder=model, latent_vector=latent_partial, n_pts_per_axis=n_pts_per_axis,
-                                voxel_origin=voxel_origin, voxel_size=voxel_size, path_original_mesh=vert_fname,
-                                offset=offset, scale=scale, icp_transform=icp_transform, objects=objects,
-                                verbose=True, device=device, scale_to_original_mesh=False) #, smooth=1.0)
-        
     # Normalize and scale output using model config training params
     center, max_radius = get_norm_params(sdf_dataset, sample_dict, vert_fname)
     mesh_pv = normalize_mesh(mesh_out, vert_fname, config, center, max_radius)
 
     # Save mesh
-    mesh_pv = mesh_pv.clean().triangulate()
+    mesh_pv = mesh_pv.clean().triangulate().extract_surface(algorithm=None)
     for arr in ['RegionId', 'vtkOriginalCellIds']:
         if arr in mesh_pv.cell_data.keys():
             mesh_pv.cell_data.remove(arr)
