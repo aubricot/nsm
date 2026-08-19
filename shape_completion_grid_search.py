@@ -13,8 +13,8 @@ import vtk
 import re
 import random
 from NSM.helper_funcs import load_config, load_model_and_latents, convert_ply_to_vtk, fixed_point_coords, safe_load_mesh_scalars 
-from NSM.optimization import normalize_mesh, get_norm_params, encode_latent, reconstruct_mesh_from_latent, build_sdf_dataset
-from NSM.evaluation import strip_partial_mesh_name, build_partial_gt_mesh_pairs, uniform_surface_sample, chamfer_distance, load_best_cfg_from_csv, grid_search
+from NSM.optimization import normalize_mesh, get_norm_params, encode_latent, encode_latent_pointnet, reconstruct_mesh_from_latent, build_sdf_dataset
+from NSM.evaluation import strip_partial_mesh_name, build_partial_gt_mesh_pairs, uniform_surface_sample, chamfer_distance, load_best_cfg_from_csv, grid_search, grid_search_pointnet
 # Monkey Patch into pymskt.mesh.meshes.Mesh
 meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
 meshes.Mesh.point_coords = property(fixed_point_coords)
@@ -30,6 +30,13 @@ N_TRIALS = 15   # TO DO: Choose the number of trials for the grid search
 N_TRIAL_INF = 30   # TO DO: Choose the number of meshes to use for inference in each grid search trial
 N_FINAL_INF = 50   # TO DO: Choose how many meshes to use for final inference with best config reconstruction parameters from grid search
 split = "val"  # TO DO: Which dataset split to use - "train", "val", or "test"
+fast_mode = True  # TO DO: Use fast mode to encode via PointNet or using 2-phase latent optimization (slow)
+if fast_mode == True:
+    OUTDIR = TRAIN_DIR + "/shape_completion/fine_tuning_encoder"
+    encoder_path = TRAIN_DIR + "/encoder/checkpoints/encoder.pt" # TO DO: Point to encoder ckpt
+    encoder_ckpt = os.path.abspath(encoder_path)
+else: 
+    OUTDIR = TRAIN_DIR + "/shape_completion/fine_tuning"
 
 # Load model config
 config = load_config(config_path=TRAIN_DIR + '/model_params_config.json')
@@ -53,21 +60,30 @@ with open(val_sum_fn, "r") as f:
 pairs = build_partial_gt_mesh_pairs(partial_mesh_summary, mesh_names, split_key)
 
 # Find the best hyperparameters for shape completion using random grid search
-best_cfg, trial_rows = grid_search(pairs, model, config, mean_latent, latent_codes, device,
-                                    out_dir= TRAIN_DIR + "/shape_completion/fine_tuning",
-                                    n_trials=N_TRIALS, valN=N_TRIAL_INF,
-                                    log_path_csv= TRAIN_DIR + "/shape_completion/fine_tuning/trial_scores.csv")
+if fast_mode: 
+    # Fast mode: one-shot encoder instead of full latent optimization 
+    best_cfg, trial_rows = grid_search_pointnet(pairs, model, config, mean_latent, latent_codes, device, encoder_ckpt,
+                                                out_dir=OUTDIR,
+                                                n_trials=N_TRIALS, valN=N_TRIAL_INF,
+                                                log_path_csv=OUTDIR + "/trial_scores.csv")
+
+else:   
+    # Encode latent via 2 stage optimization (auto-decoder framework)
+    best_cfg, trial_rows = grid_search(pairs, model, config, mean_latent, latent_codes, device, 
+                                        out_dir=OUTDIR,
+                                        n_trials=N_TRIALS, valN=N_TRIAL_INF,
+                                        log_path_csv=OUTDIR + "/trial_scores.csv")
 
 # Loop through meshes using best parameters from grid search
 best_summary_log = []
-inf_subset = random.sample(pairs, N_FINAL_INF) # Get the inference subset
+inf_subset = random.sample(pairs, N_FINAL_INF)
 for i, (pm_path, gt_path) in enumerate(inf_subset, start=1):    
     try:
         print(f"\033[32m\n=== Processing {os.path.basename(pm_path)} ===\033[0m")
         print(f"\033[32m\n=== {i} of {len(inf_subset)} ===\033[0m")
         # Make a new dir to save predictions
         vert_fname = pm_path
-        outfpath = TRAIN_DIR + '/shape_completion/fine_tuning/best_cfg_predictions/' + os.path.splitext(os.path.basename(vert_fname))[0] # TO DO: Adjust to desired outpath
+        outfpath = OUTDIR + '/best_cfg_predictions/' + os.path.splitext(os.path.basename(vert_fname))[0] # TO DO: Adjust to desired outpath
         print("Making a new directory to save model predictions and outputs at: ", outfpath)
         os.makedirs(outfpath, exist_ok=True)
 
@@ -76,16 +92,31 @@ for i, (pm_path, gt_path) in enumerate(inf_subset, start=1):
             ply_fname = vert_fname
             mesh, vert_fname = convert_ply_to_vtk(ply_fname, save=True)
 
-        # Setup your dataset with just one mesh
-        points, sdf_vals, sdf_dataset, sample_dict = build_sdf_dataset(vert_fname, config, n_samples=240)
+        # Latent encoding
+        if fast_mode:
+            # Build the SDF dataset using all surface samples
+            points, sdf_vals, sdf_dataset, sample_dict = build_sdf_dataset(vert_fname, config, n_samples=None) # Use all points instead of downsampling by n_samples
+           
+            # Fast mode: one-shot encoder instead of full latent optimization 
+            print("\n-----Fast mode: encoding latent (single forward pass)----\n")
+            latent_opt = encode_latent_pointnet(encoder_ckpt, points, sdf_vals, device)
+            if best_cfg['iters'] > 0:
+                latent_opt, _ = optimize_latent_partial(decoder=model, partial_pts=points.squeeze(), sdfs=sdf_vals, latent_dim=latent_codes.shape[1], latent_init=latent_opt, 
+                                                        top_k=best_cfg['top_k'], iters=best_cfg['iters'], lr=best_cfg['lr'], lambda_reg=best_cfg['lambda_reg'], 
+                                                        clamp_val=best_cfg['clamp'], latent_std=best_cfg['latent_std'], scheduler_step=best_cfg['sched_step'], 
+                                                        scheduler_gamma=best_cfg['sched_gamma'], batch_inference_size=best_cfg['batch_infer'], multi_stage=True, device=device)        
 
-        # Encode latent via 2 stage optimization (auto-decoder framework)
-        latent_opt = encode_latent(decoder=model, points=points.squeeze(), sdf_vals=sdf_vals, latent_dim=latent_codes.shape[1], 
-                                mean_latent=mean_latent, latent_codes=latent_codes, top_k_reg=best_cfg['top_k'], latent_std=best_cfg['latent_std'],
-                                iters1=best_cfg['iters1'], iters2=best_cfg['iters2'], lr1=best_cfg['lr1'], lr2=best_cfg['lr2'], 
-                                lambda_reg1=best_cfg['lambda1'], lambda_reg2=best_cfg['lambda2'], clamp_val1=best_cfg['clamp1'], clamp_val2=best_cfg['clamp2'], 
-                                scheduler_step1=best_cfg['sched_step'], scheduler_step2=best_cfg['sched_step'], scheduler_gamma1=best_cfg['sched_gamma1'],
-                                scheduler_gamma2=best_cfg['sched_gamma2'], batch_inference_size=best_cfg['batch_infer']) 
+        else:
+            # Setup your dataset with just one mesh
+            points, sdf_vals, sdf_dataset, sample_dict = build_sdf_dataset(vert_fname, config, n_samples=240)
+
+            # Encode latent via 2 stage optimization (auto-decoder framework)
+            latent_opt = encode_latent(decoder=model, points=points.squeeze(), sdf_vals=sdf_vals, latent_dim=latent_codes.shape[1], 
+                                        mean_latent=mean_latent, latent_codes=latent_codes, top_k_reg=best_cfg['top_k'], latent_std=best_cfg['latent_std'],
+                                        iters1=best_cfg['iters1'], iters2=best_cfg['iters2'], lr1=best_cfg['lr1'], lr2=best_cfg['lr2'], 
+                                        lambda_reg1=best_cfg['lambda1'], lambda_reg2=best_cfg['lambda2'], clamp_val1=best_cfg['clamp1'], clamp_val2=best_cfg['clamp2'], 
+                                        scheduler_step1=best_cfg['sched_step'], scheduler_step2=best_cfg['sched_step'], scheduler_gamma1=best_cfg['sched_gamma1'],
+                                        scheduler_gamma2=best_cfg['sched_gamma2'], batch_inference_size=best_cfg['batch_infer']) 
 
         # Reconstruction mesh from latent
         mesh_out = reconstruct_mesh_from_latent(vert_fname, model, latent_opt, best_cfg)
@@ -123,7 +154,7 @@ for i, (pm_path, gt_path) in enumerate(inf_subset, start=1):
         continue
 
 summary_df = pd.DataFrame(best_summary_log)
-summary_df_fpath = TRAIN_DIR + '/shape_completion/fine_tuning/best_cfg_predictions/inference_summary.csv'
+summary_df_fpath = OUTDIR + '/best_cfg_predictions/inference_summary.csv'
 summary_df.to_csv(summary_df_fpath, index=False)
 print(f"\nMean Chamfer across {len(summary_df)} meshes: {summary_df['chamfer'].mean():.4f}")
 print("Outputs logged to: ", summary_df_fpath)
