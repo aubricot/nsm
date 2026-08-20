@@ -26,12 +26,13 @@ LC_PATH =  TRAIN_DIR + '/latent_codes' + '/' + CKPT + '.pth'
 MODEL_PATH = TRAIN_DIR +  '/model' + '/' + CKPT + '.pth'
 val_sum_fn = TRAIN_DIR + "/shape_completion/meshes/" + "partial_meshing_summary.json" # TO DO: Choose path to partial_meshing_summary.json from (generated using create_partial_meshes.py)
 BEST_CFG_CSV = TRAIN_DIR + "/shape_completion/fine_tuning/trial_scores.csv"  # TO DO: set to your CSV path
-LOAD_BEST_CFG_FROM_CSV = False
+LOAD_BEST_CFG_FROM_CSV = True
 split = "train"  # TO DO: Which dataset split to use - "train", "val", or "test"
 N_INF = "all"  # TO DO: Choose how many meshes to use for inference (or use "all" to run for all)
 fast_mode = True  # TO DO: Use fast mode to encode via PointNet or using 2-phase latent optimization (slow)
 if fast_mode == True:
     encoder_path = TRAIN_DIR + "/encoder/checkpoints/encoder.pt" # TO DO: Point to encoder ckpt
+    BEST_CFG_CSV = TRAIN_DIR + "/shape_completion/fine_tuning_encoder/trial_scores.csv"  # TO DO: set to your CSV path
     encoder_ckpt = os.path.abspath(encoder_path)
     refine_iters = 0   # TO DO: Refine pointnet encoding with additional iterations (Ex: 300-500)
     refine_lr = 1e-5 # TO DO: Define learning rate for refine_iters  (ex: 1e-3 - 1e-5)
@@ -47,24 +48,36 @@ mean_latent = latent_codes.mean(dim=0, keepdim=True)
 
 # Load best optimization config from shape_completion_grid_search.py (or manually enter)
 if LOAD_BEST_CFG_FROM_CSV:
-    best_cfg = load_best_cfg_from_csv(BEST_CFG_CSV, device)
+    best_cfg = load_best_cfg_from_csv(BEST_CFG_CSV, fast_mode, device)
 
 else:           # TO DO: Manually enter chosen vals
-    best_cfg = {"top_k": 466,
-                "iters1": 5000,
-                "iters2": 8000,
-                "lr1": 1e-4,
-                "lr2": 1e-4,
-                "lambda1": 1e-2,
-                "lambda2": 1e-7,
-                "clamp1": 1,
-                "clamp2": None,
-                "latent_std": torch.tensor(0.4401),
-                "sched_step": 800,
-                "sched_gamma1": 0.7,
-                "sched_gamma2": 0.9,
-                "batch_infer": 32768,
-                "gridN": 256}
+    if fast_mode:
+        best_cfg = {"top_k": 466,
+                    "iters": 500,
+                    "lr": 1e-3,
+                    "lambda_reg": 1e-7,
+                    "clamp": None,
+                    "latent_std": torch.tensor(0.4401),
+                    "sched_step": 300,
+                    "sched_gamma": 0.9,
+                    "batch_infer": 32768,
+                    "gridN": 256}
+    else:
+        best_cfg = {"top_k": 466,
+                    "iters1": 5000,
+                    "iters2": 8000,
+                    "lr1": 1e-4,
+                    "lr2": 1e-4,
+                    "lambda1": 1e-2,
+                    "lambda2": 1e-7,
+                    "clamp1": 1,
+                    "clamp2": None,
+                    "latent_std": torch.tensor(0.4401),
+                    "sched_step": 800,
+                    "sched_gamma1": 0.7,
+                    "sched_gamma2": 0.9,
+                    "batch_infer": 32768,
+                    "gridN": 256}
 
 # Build validation ground truth dataset
 ds_split_keys = {"train": "list_mesh_paths", "val": "val_paths", "test": "test_paths"}
