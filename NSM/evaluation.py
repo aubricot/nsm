@@ -66,32 +66,47 @@ def chamfer_distance(pm, gt, n_samples=20000):
     return float(0.5*(d1 + d2)) # Return average distance (symmetric penalty)
 
 # Load in best_cfg from shape_completion_grid_search.py (or manually enter)
-def load_best_cfg_from_csv(csv_path, device):
+def load_best_cfg_from_csv(csv_path, fast_mode, device):
     df = pd.read_csv(csv_path)
     best_row = df.loc[df["mean_cd"].idxmin()]
     # Parse latent_std whether stored as "tensor(0.4401)" or plain float
     raw_std = best_row["latent_std"]
     if isinstance(raw_std, str):
-        raw_std = re.search(r"[-+eE0-9\.]+", raw_std).group()
+        if raw_std.startswith("tensor("):
+            raw_std = raw_std[len("tensor("):]
+            raw_std = raw_std.split(",")[0].rstrip(")")
     latent_std = torch.tensor(float(raw_std), device=device)
-    # clamp2 may be None/NaN
-    clamp2 = None if pd.isna(best_row["clamp2"]) else best_row["clamp2"]
+    print(f"Building config from grid search. Fast_mode={fast_mode}")
+    if fast_mode:
+        clamp = None if pd.isna(best_row["clamp"]) else best_row["clamp"]
+        best_cfg = {"top_k": int(best_row["top_k"]),
+                    'iters': int(best_row["iters"]),
+                    'lr': float(best_row["lr"]),
+                    'lambda_reg': float(best_row["lambda_reg"]),
+                    'clamp': clamp,
+                    'latent_std': latent_std,
+                    'sched_step': int(best_row["sched_step"]),
+                    'sched_gamma': float(best_row["sched_gamma"]),
+                    'batch_infer': int(best_row["batch_infer"]),
+                    'gridN': int(best_row["gridN"])}
 
-    best_cfg = {"top_k":       int(best_row["top_k"]),
-                "iters1":      int(best_row["iters1"]),
-                "iters2":      int(best_row["iters2"]),
-                "lr1":         float(best_row["lr1"]),
-                "lr2":         float(best_row["lr2"]),
-                "lambda1":     float(best_row["lambda1"]),
-                "lambda2":     float(best_row["lambda2"]),
-                "clamp1":      best_row["clamp1"],
-                "clamp2":      clamp2,
-                "latent_std":  latent_std,
-                "sched_step":  int(best_row["sched_step"]),
-                "sched_gamma1": float(best_row["sched_gamma1"]),
-                "sched_gamma2": float(best_row["sched_gamma2"]),
-                "batch_infer": int(best_row["batch_infer"]),
-                "gridN":       int(best_row["gridN"])}
+    else:
+        clamp2 = None if pd.isna(best_row["clamp2"]) else best_row["clamp2"]
+        best_cfg = {"top_k":       int(best_row["top_k"]),
+                    "iters1":      int(best_row["iters1"]),
+                    "iters2":      int(best_row["iters2"]),
+                    "lr1":         float(best_row["lr1"]),
+                    "lr2":         float(best_row["lr2"]),
+                    "lambda1":     float(best_row["lambda1"]),
+                    "lambda2":     float(best_row["lambda2"]),
+                    "clamp1":      best_row["clamp1"],
+                    "clamp2":      clamp2,
+                    "latent_std":  latent_std,
+                    "sched_step":  int(best_row["sched_step"]),
+                    "sched_gamma1": float(best_row["sched_gamma1"]),
+                    "sched_gamma2": float(best_row["sched_gamma2"]),
+                    "batch_infer": int(best_row["batch_infer"]),
+                    "gridN":       int(best_row["gridN"])}
 
     print(f"\nLoaded best_cfg from CSV (min mean_cd = {best_row['mean_cd']:.4f}):")
     return best_cfg
@@ -105,7 +120,6 @@ def grid_search(pairs, model, config, mean_latent, latent_codes, device, out_dir
     rows = []
     # Define how many PCs describe X% of variance
     _, k95 = get_top_k_pcs(latent_codes, threshold=0.95)
-    _, k90 = get_top_k_pcs(latent_codes, threshold=0.90)
     _, k99 = get_top_k_pcs(latent_codes, threshold=0.99)
     latent_std = latent_codes.std().mean()
 
@@ -204,12 +218,12 @@ def grid_search_pointnet(pairs, model, config, mean_latent, latent_codes, device
         trial_cfg = {
             'top_k': random.choice([k95, k99]),
             'iters': random.choice([0, 300, 500, 700]),
-            'lr': random.choice([1e-6, 1e-5, 1e-4, 1e-3]),
-            'lambda_reg': random.choice([1e-8, 1e-7, 1e-6, 1e-5]),
-            'clamp': random.choice([None, 1]),
+            'lr': random.choice([1e-5, 1e-4, 1e-3]),
+            'lambda_reg': random.choice([1e-7, 1e-6, 1e-5]),
+            'clamp': None,
             'latent_std': latent_std,
             'sched_step': random.choice([100, 200, 300]),
-            'sched_gamma': random.choice([0.7, 0.9]),
+            'sched_gamma': random.choice([0.5, 0.7, 0.9]),
             'batch_infer': random.choice([32768]),
             'gridN': random.choice([128, 256])}
         scores = []
