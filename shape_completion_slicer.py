@@ -119,9 +119,14 @@ def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_p
                                         lambda_reg2=phase2_lambda_reg, clamp_val1=1.0, clamp_val2=None, scheduler_step1=800, scheduler_step2=800, 
                                         scheduler_gamma1=0.9, scheduler_gamma2=0.7, batch_inference_size=32768) 
         
+        # Save the encoded latent so downstream classification can skip re-optimization
+        latent_path = os.path.join(outfpath, os.path.splitext(os.path.basename(vert_fname))[0] + "_shape_completion_latent.npy")
+        np.save(latent_path, latent_opt.detach().cpu().numpy())
+        print(f"Encoded latent saved to: {latent_path}")
+
         # Reconstruction mesh from latent
         mesh_out = reconstruct_mesh_from_latent(vert_fname, model, latent_opt, config)
-            
+
         # Normalize and scale output using model config training params
         center, max_radius = get_norm_params(sdf_dataset, sample_dict, vert_fname)
         mesh_pv = normalize_mesh(mesh_out, vert_fname, config, center, max_radius)

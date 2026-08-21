@@ -63,27 +63,33 @@ def _load_model_bundle(args, device):
     return config, model, latent_codes, mean_latent, top_k_reg
 
 
-def _classify_one(mesh_path, config, model, latent_codes, mean_latent, top_k_reg, device, args):
+def _classify_one(mesh_path, config, model, latent_codes, mean_latent, top_k_reg, device, args, latent_path=None):
     """Optimize a latent for one mesh and return (matches, latent_np, top_indices)."""
-    mesh_path = _prepare_mesh(mesh_path, args.output_dir)
-    print("Classification mesh: {}".format(mesh_path))
-    dataset = SDFSamples(
-        list_mesh_paths=[mesh_path], multiprocessing=False,
-        subsample=config["samples_per_object_per_batch"], print_filename=True,
-        n_pts=config["n_pts_per_object"], p_near_surface=config["percent_near_surface"],
-        p_further_from_surface=config["percent_further_from_surface"],
-        sigma_near=config["sigma_near"], sigma_far=config["sigma_far"],
-        rand_function=config["random_function"], center_pts=config["center_pts"],
-        norm_pts=config["normalize_pts"], scale_method=config["scale_method"],
-        reference_mesh=None, verbose=config["verbose"], save_cache=config["cache"],
-        equal_pos_neg=config["equal_pos_neg"], fix_mesh=config["fix_mesh"],
-    )
-    sample, _ = dataset[0]
-    latent = optimize_latent(
-        model, sample["xyz"].to(device), sample["gt_sdf"].to(device),
-        config["latent_size"], top_k_reg, mean_latent, latent_codes,
-        iters=args.iterations, lr=args.learning_rate, device=device,
-    )
+    if latent_path and os.path.isfile(latent_path):
+        print("Loading precomputed latent from: {}".format(latent_path))
+        latent = torch.as_tensor(np.load(latent_path), dtype=torch.float32, device=device)
+        if latent.dim() == 1:
+            latent = latent.unsqueeze(0)
+    else:
+        mesh_path = _prepare_mesh(mesh_path, args.output_dir)
+        print("Classification mesh: {}".format(mesh_path))
+        dataset = SDFSamples(
+            list_mesh_paths=[mesh_path], multiprocessing=False,
+            subsample=config["samples_per_object_per_batch"], print_filename=True,
+            n_pts=config["n_pts_per_object"], p_near_surface=config["percent_near_surface"],
+            p_further_from_surface=config["percent_further_from_surface"],
+            sigma_near=config["sigma_near"], sigma_far=config["sigma_far"],
+            rand_function=config["random_function"], center_pts=config["center_pts"],
+            norm_pts=config["normalize_pts"], scale_method=config["scale_method"],
+            reference_mesh=None, verbose=config["verbose"], save_cache=config["cache"],
+            equal_pos_neg=config["equal_pos_neg"], fix_mesh=config["fix_mesh"],
+        )
+        sample, _ = dataset[0]
+        latent = optimize_latent(
+            model, sample["xyz"].to(device), sample["gt_sdf"].to(device),
+            config["latent_size"], top_k_reg, mean_latent, latent_codes,
+            iters=args.iterations, lr=args.learning_rate, device=device,
+        )
 
     codes = latent_codes.to(device)
     distances = 1.0 - torch.nn.functional.cosine_similarity(codes, latent.to(device), dim=1)
@@ -160,7 +166,8 @@ def classify(args):
         print("\nBulk classification results written to " + args.result)
     else:
         matches, latent_np, indices = _classify_one(
-            args.input_mesh, config, model, latent_codes, mean_latent, top_k_reg, device, args)
+            args.input_mesh, config, model, latent_codes, mean_latent, top_k_reg, device, args,
+            latent_path=args.fossil_latent)
         np.save(os.path.join(args.output_dir, "fossil_latent.npy"), latent_np)
         np.save(os.path.join(args.output_dir, "top5_indices.npy"), np.array(indices))
         _write_result_json(args.result, matches)
@@ -174,6 +181,9 @@ if __name__ == "__main__":
     parser.add_argument("--latent_codes", required=True)
     parser.add_argument("--input_mesh")
     parser.add_argument("--input_dir")
+    parser.add_argument("--fossil_latent",
+                        help="Path to a precomputed latent .npy (e.g. from Shape Completion). "
+                             "When set with --input_mesh, skips SDF sampling + latent optimization.")
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--result", required=True)
     parser.add_argument("--iterations", type=int, default=1000)

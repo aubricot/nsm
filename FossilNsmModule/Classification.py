@@ -72,6 +72,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self._fossilPath = None
         self._fossilLatentPath = None
         self._top5IndicesPath = None
+        self._loadedShapeCompletionLatent = None
         self.inputFolderPath = None
         self._bulkResults = []
         self._bulkAllLatentsPath = None
@@ -370,8 +371,29 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             return
         self.inputFilePath = path
         self.inputFileLabel.setText(path)
-        self.updateRunButton()
         self.onLogMessage("Loaded shape completion result as input mesh:\n" + path, color="#4CAF50")
+
+        resultDir = os.path.dirname(path)
+
+        if not self.modelRootPath:
+            candidateRoot = os.path.dirname(os.path.dirname(resultDir))
+            if os.path.isfile(os.path.join(candidateRoot, "model_params_config.json")):
+                if self._applyModelRoot(candidateRoot):
+                    self.onLogMessage("Auto-populated Model Root:\n" + candidateRoot, color="#4CAF50")
+
+        self._loadedShapeCompletionLatent = None
+        latentMatches = sorted(glob.glob(os.path.join(resultDir, "*_shape_completion_latent.npy")))
+        if latentMatches:
+            self._loadedShapeCompletionLatent = latentMatches[0]
+            self.onLogMessage(
+                "Found encoded latent (classification will skip re-optimization):\n"
+                + self._loadedShapeCompletionLatent, color="#4CAF50")
+        else:
+            self.onLogMessage(
+                "No saved latent found next to this mesh; classification will run full "
+                "latent optimization.", color="orange")
+
+        self.updateRunButton()
 
     def _pickExistingFile(self, directory, *names):
         for name in names:
@@ -469,6 +491,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             return
         self.inputFolderPath = path
         self.inputFolderLabel.setText(path)
+        self._loadedShapeCompletionLatent = None
         self.updateRunButton()
 
     def _readIterations(self):
@@ -494,11 +517,17 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self._allLatentsPath = os.path.join(resultDirectory, "all_latents.npy")
         self._fossilLatentPath = os.path.join(resultDirectory, "fossil_latent.npy")
         self._top5IndicesPath = os.path.join(resultDirectory, "top5_indices.npy")
-        self.onLogMessage("Starting nearest-mesh classification (latent optimization may take several minutes)...\n\n\n", color="#4CAF50")
-        self._runWorker([
+        workerArgs = [
             "--input_mesh", self.inputFilePath, "--output_dir", resultDirectory,
             "--iterations", str(iterations),
-        ], resultPath, logPath)
+        ]
+        latentPath = getattr(self, "_loadedShapeCompletionLatent", None)
+        if latentPath and os.path.isfile(latentPath):
+            workerArgs.extend(["--fossil_latent", latentPath])
+            self.onLogMessage("Using encoded latent from Shape Completion; skipping latent optimization...\n\n\n", color="#4CAF50")
+        else:
+            self.onLogMessage("Starting nearest-mesh classification (latent optimization may take several minutes)...\n\n\n", color="#4CAF50")
+        self._runWorker(workerArgs, resultPath, logPath)
 
     def onClassifyFolder(self):
         iterations = self._readIterations()

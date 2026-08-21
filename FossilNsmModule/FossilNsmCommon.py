@@ -137,7 +137,9 @@ class FossilNsmCommonWidget:
         path = qt.QFileDialog.getExistingDirectory(None, "Select Model Root Folder")
         if not path:
             return
+        self._applyModelRoot(path)
 
+    def _applyModelRoot(self, path):
         self.configFilePath = None
         self.modelFilePath = None
         self.latentCodesFilePath = None
@@ -150,7 +152,7 @@ class FossilNsmCommonWidget:
         if not ok:
             self.onLogMessage("Model root is incomplete. Fix missing files before running.", color="red")
             self.updateRunButton()
-            return
+            return False
 
         config, model, latents, output = self.resolveModelRoot(path)
 
@@ -169,6 +171,7 @@ class FossilNsmCommonWidget:
             self.encoderCkptInput.setText(encoderCkpt if os.path.isfile(encoderCkpt) else "")
 
         self.updateRunButton()
+        return True
 
     def onSelectInputFile(self):
         path = qt.QFileDialog.getOpenFileName(
@@ -178,6 +181,7 @@ class FossilNsmCommonWidget:
             return
         self.inputFilePath = path
         self.inputFileLabel.setText(path)
+        self._loadedShapeCompletionLatent = None
         self.updateRunButton()
 
     def commonInputsReady(self):
