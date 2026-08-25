@@ -8,17 +8,11 @@ import random
 import torch
 import pymskt.mesh.meshes as meshes
 from NSM.datasets import SDFSamples
-from NSM.helper_funcs import (
-        fixed_point_coords,
-        load_config,
-        load_model_and_latents,
-        safe_load_mesh_scalars,
-    )
-from NSM.optimization import get_top_k_pcs, optimize_latent
+from NSM.helper_funcs import fixed_point_coords, load_config, load_model_and_latents, safe_load_mesh_scalars, convert_ply_to_vtk
+from NSM.optimization import get_top_k_pcs, optimize_latent, build_sdf_dataset
 
 import pymskt.mesh.meshTools as meshTools
 import pyvista as pv
-
 
 def patch_signed_distance_dtype():
     original = meshTools.pcu.signed_distance_to_mesh
@@ -29,27 +23,12 @@ def patch_signed_distance_dtype():
         return original(pts, points, faces)
     meshTools.pcu.signed_distance_to_mesh = signed_distance_to_mesh_patch
 
-
-def _prepare_mesh(mesh_path, output_dir):
-    if not mesh_path.lower().endswith(".ply"):
-        return mesh_path
-    converted = os.path.join(
-        output_dir, os.path.splitext(os.path.basename(mesh_path))[0] + ".vtk"
-    )
-    pv.read(mesh_path).save(converted)
-    return converted
-
-
 MESH_EXTENSIONS = (".vtk", ".vtp", ".stl", ".obj", ".ply")
 
-
 def _list_meshes(input_dir):
-    return [
-        os.path.join(input_dir, name)
-        for name in sorted(os.listdir(input_dir))
-        if name.lower().endswith(MESH_EXTENSIONS)
-    ]
-
+    return [os.path.join(input_dir, name)
+            for name in sorted(os.listdir(input_dir))
+            if name.lower().endswith(MESH_EXTENSIONS)]
 
 def _load_model_bundle(args, device):
     config = load_config(args.config)
@@ -71,25 +50,12 @@ def _classify_one(mesh_path, config, model, latent_codes, mean_latent, top_k_reg
         if latent.dim() == 1:
             latent = latent.unsqueeze(0)
     else:
-        mesh_path = _prepare_mesh(mesh_path, args.output_dir)
+        _, mesh_path = convert_ply_to_vtk(mesh_path)
         print("Classification mesh: {}".format(mesh_path))
-        dataset = SDFSamples(
-            list_mesh_paths=[mesh_path], multiprocessing=False,
-            subsample=config["samples_per_object_per_batch"], print_filename=True,
-            n_pts=config["n_pts_per_object"], p_near_surface=config["percent_near_surface"],
-            p_further_from_surface=config["percent_further_from_surface"],
-            sigma_near=config["sigma_near"], sigma_far=config["sigma_far"],
-            rand_function=config["random_function"], center_pts=config["center_pts"],
-            norm_pts=config["normalize_pts"], scale_method=config["scale_method"],
-            reference_mesh=None, verbose=config["verbose"], save_cache=config["cache"],
-            equal_pos_neg=config["equal_pos_neg"], fix_mesh=config["fix_mesh"],
-        )
-        sample, _ = dataset[0]
-        latent = optimize_latent(
-            model, sample["xyz"].to(device), sample["gt_sdf"].to(device),
-            config["latent_size"], top_k_reg, mean_latent, latent_codes,
-            iters=args.iterations, lr=args.learning_rate, device=device,
-        )
+        points, sdf_vals, sdf_dataset, sample_dict = build_sdf_dataset(mesh_path, config, config["n_pts_per_object"])
+        latent = optimize_latent(model, points, sdf_vals, config["latent_size"], 
+                                 top_k_reg, mean_latent, latent_codes, iters=args.iterations,
+                                 lr=args.learning_rate, device=device)
 
     codes = latent_codes.to(device)
     distances = 1.0 - torch.nn.functional.cosine_similarity(codes, latent.to(device), dim=1)
