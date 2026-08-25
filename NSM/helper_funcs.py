@@ -41,17 +41,19 @@ def pv_to_o3d(mesh_pv):
     return mesh_o3d
 
 # Convert ply file to vtk
-def convert_ply_to_vtk(input_file, output_file=None, save=False):
-    if not input_file.lower().endswith('.ply'):
-        raise ValueError("Input file must have a .ply extension.")
+def convert_ply_to_vtk(input_file, output_file=None, output_dir=None, save=False):
     if not os.path.exists(input_file):
-        raise FileNotFoundError(f"Input file does not exist: {input_file}")
-    if output_file is None:
-        output_file = os.path.splitext(input_file)[0] + ".vtk"
+        print(f"File does not exist: {input_file}")
+        return None, None
     mesh = pv.read(input_file)
-    if save==True:
+    if input_file.lower().endswith(".ply"):
+        return mesh, input_file
+    if output_file is None:
+        name = os.path.splitext(os.path.basename(input_file))[0] + ".vtk"
+        output_file = os.path.join(output_dir or os.path.dirname(input_file), name)
+    if save:
         mesh.save(output_file)
-    print(f"Converted {input_file} -> {output_file}")
+        print(f"Converted {input_file} -> {output_file}")
     return mesh, output_file
 
 # Load model config file
