@@ -12,7 +12,7 @@ import pymskt.mesh.meshes as meshes
 import vtk
 import random
 from NSM.helper_funcs import load_config, load_model_and_latents, convert_ply_to_vtk, fixed_point_coords, safe_load_mesh_scalars 
-from NSM.optimization import normalize_mesh, get_norm_params, encode_latent, encode_latent_pointnet, reconstruct_mesh_from_latent, build_sdf_dataset
+from NSM.optimization import normalize_mesh, get_norm_params, encode_latent, encode_latent_pointnet, reconstruct_mesh_from_latent, build_sdf_dataset, optimize_latent_partial
 from NSM.evaluation import strip_partial_mesh_name, build_partial_gt_mesh_pairs, uniform_surface_sample, chamfer_distance, load_best_cfg_from_csv
 # Monkey Patch into pymskt.mesh.meshes.Mesh
 meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
@@ -27,16 +27,13 @@ MODEL_PATH = TRAIN_DIR +  '/model' + '/' + CKPT + '.pth'
 val_sum_fn = TRAIN_DIR + "/shape_completion/meshes/" + "partial_meshing_summary.json" # TO DO: Choose path to partial_meshing_summary.json from (generated using create_partial_meshes.py)
 BEST_CFG_CSV = TRAIN_DIR + "/shape_completion/fine_tuning/trial_scores.csv"  # TO DO: set to your CSV path
 LOAD_BEST_CFG_FROM_CSV = True
-split = "train"  # TO DO: Which dataset split to use - "train", "val", or "test"
+split = "val"  # TO DO: Which dataset split to use - "train", "val", or "test"
 N_INF = "all"  # TO DO: Choose how many meshes to use for inference (or use "all" to run for all)
 fast_mode = True  # TO DO: Use fast mode to encode via PointNet or using 2-phase latent optimization (slow)
 if fast_mode == True:
     encoder_path = TRAIN_DIR + "/encoder/checkpoints/encoder.pt" # TO DO: Point to encoder ckpt
     BEST_CFG_CSV = TRAIN_DIR + "/shape_completion/fine_tuning_encoder/trial_scores.csv"  # TO DO: set to your CSV path
     encoder_ckpt = os.path.abspath(encoder_path)
-    refine_iters = 0   # TO DO: Refine pointnet encoding with additional iterations (Ex: 300-500)
-    refine_lr = 1e-5 # TO DO: Define learning rate for refine_iters  (ex: 1e-3 - 1e-5)
-    refine_lambda_reg = 1e-5 # TO DO: Define lambda reg for refine_iters  (ex: 1e-4 - 1e-7)
 
 # Load model config
 config = load_config(config_path=TRAIN_DIR + '/model_params_config.json')
@@ -49,13 +46,14 @@ mean_latent = latent_codes.mean(dim=0, keepdim=True)
 # Load best optimization config from shape_completion_grid_search.py (or manually enter)
 if LOAD_BEST_CFG_FROM_CSV:
     best_cfg = load_best_cfg_from_csv(BEST_CFG_CSV, fast_mode, device)
+    cfg_source = f"CSV ({BEST_CFG_CSV})"
 
-else:           # TO DO: Manually enter chosen vals
+else:        # TO DO: Manually enter chosen vals
     if fast_mode:
-        best_cfg = {"top_k": 466,
-                    "iters": 500,
+        best_cfg = {"refine_iters": 200, # TO DO: Refine pointnet encoding with additional iterations (Ex: 300-500)
+                    "top_k": 466,
                     "lr": 1e-3,
-                    "lambda_reg": 1e-7,
+                    "lambda_reg": 1e-6,
                     "clamp": None,
                     "latent_std": torch.tensor(0.4401),
                     "sched_step": 300,
@@ -78,12 +76,20 @@ else:           # TO DO: Manually enter chosen vals
                     "sched_gamma2": 0.9,
                     "batch_infer": 32768,
                     "gridN": 256}
+    cfg_source = "Manual entry"
+        
+encoding_strategy = "PointNet encoder" if fast_mode else "2-phase latent optimization"
+print(f"\n\nEncoding strategy : {encoding_strategy}")
+print(f"Config source     : {cfg_source}")
+print(f"Config values     :")
+for k, v in best_cfg.items():
+    print(f"  {k:<20} {v}")
 
 # Build validation ground truth dataset
 ds_split_keys = {"train": "list_mesh_paths", "val": "val_paths", "test": "test_paths"}
 split_key = ds_split_keys[split]
 mesh_names = {strip_partial_mesh_name(p) for p in config[split_key]}
-print(f"Found {len(config[split_key])} meshes in config['{split_key}'] (split='{split}')")
+print(f"\n\nFound {len(config[split_key])} meshes in config['{split_key}'] (split='{split}')")
 
 # Load partial meshing summary
 with open(val_sum_fn, "r") as f:
@@ -92,8 +98,18 @@ with open(val_sum_fn, "r") as f:
 # Find corresponding partial meshes to use for shape completion against ground truth meshes
 pairs = build_partial_gt_mesh_pairs(partial_mesh_summary, mesh_names, split_key)
 
+# Build outfpath
+outfpath = TRAIN_DIR + '/shape_completion/evaluation/'
+os.makedirs(outfpath, exist_ok=True)
+mode_name = "encoder" if fast_mode else "2phase"
+summary_df_fpath = outfpath + f"{mode_name}_{split}_chamfer.csv"
+write_header = not os.path.exists(summary_df_fpath)
+csv_file = open(summary_df_fpath, 'a', newline='')
+if write_header:
+    csv_file.write("mesh,chamfer,gt_path\n")
+print(f"\nSaving results to: {summary_df_fpath}")
+
 # Loop through meshes using best parameters from grid search
-summary_log = []
 inf_subset = random.sample(pairs, N_INF) if N_INF != "all" else pairs
 for i, (pm_path, gt_path) in enumerate(inf_subset, start=1):    
     try:
@@ -113,12 +129,11 @@ for i, (pm_path, gt_path) in enumerate(inf_subset, start=1):
             # Fast mode: one-shot encoder instead of full latent optimization 
             print("\n-----Fast mode: encoding latent (single forward pass)----\n")
             latent_opt = encode_latent_pointnet(encoder_ckpt, points, sdf_vals, device)
-            if refine_iters > 0:
-                lr = refine_lr if refine_lr is not None else phase2_lr
-                lam = refine_lambda_reg if refine_lambda_reg is not None else phase2_lambda_reg
-                print(f"Refining encoder latent for {refine_iters} iters (lr={lr}, lambda={lam})...")
-                latent_opt, _ = optimize_latent_partial(model, points.squeeze(), sdf_vals, config['latent_size'], latent_init=latent_opt, top_k=top_k_reg,
-                                                        iters=refine_iters, lr=lr, lambda_reg=lam, clamp_val=None, latent_std=latent_std, scheduler_step=800, 
+            if best_cfg['refine_iters'] > 0:
+                print(f"Refining encoder latent for {best_cfg['refine_iters']} iters (lr={best_cfg['lr']}, lambda={best_cfg['lambda_reg']})...")
+                latent_opt, _ = optimize_latent_partial(model, points.squeeze(), sdf_vals, config['latent_size'], latent_init=latent_opt, top_k=best_cfg['top_k'],
+                                                        iters=best_cfg['refine_iters'], lr=best_cfg['lr'], lambda_reg=best_cfg['lambda_reg'], clamp_val=None, 
+                                                        latent_std=best_cfg['latent_std'], scheduler_step=800, 
                                                         scheduler_gamma=0.7, batch_inference_size=32768, multi_stage=True, device=device)        
 
         else:
@@ -145,25 +160,22 @@ for i, (pm_path, gt_path) in enumerate(inf_subset, start=1):
         gt = pv.read(gt_path).triangulate().extract_surface(algorithm=None)
         cd = chamfer_distance(pred, gt, n_samples=20000)
         print(f"\n{os.path.basename(pm_path)} Chamfer={cd:.4f}\n") 
-        summary_log.append({'mesh': os.path.basename(pm_path),
-                                 'chamfer': cd,
-                                 'gt_path': gt_path})
+        # Log results to csv
+        row = pd.DataFrame([{'mesh': os.path.basename(pm_path), 'chamfer': cd, 'gt_path': gt_path}])
+        row.to_csv(csv_file, index=False, header=False)
+        csv_file.flush()
 
     except Exception as e:
         print(f"\033[31mERROR processing {os.path.basename(pm_path)}: {e}\033[0m")
-        summary_log.append({'mesh': os.path.basename(pm_path),
-                            'chamfer': None,
-                            'gt_path': gt_path})
+        # Log results to csv
+        row = pd.DataFrame([{'mesh': os.path.basename(pm_path), 'chamfer': None, 'gt_path': gt_path}])
+        row.to_csv(csv_file, index=False, header=False)
+        csv_file.flush()
         continue
 
 # Save results
-summary_df = pd.DataFrame(summary_log)
-outfpath = TRAIN_DIR + '/shape_completion/evaluation/'
-os.makedirs(outfpath, exist_ok=True)
-
-summary_df_fpath = outfpath + f"{split_key}_chamfer.csv"
-summary_df.to_csv(summary_df_fpath, index=False)
-
+csv_file.close()
+summary_df = pd.read_csv(summary_df_fpath)
 print(f"\nMean Chamfer across {len(summary_df)} meshes: {summary_df['chamfer'].mean():.4f}")
 print("Outputs logged to: ", summary_df_fpath)
 
