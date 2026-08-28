@@ -9,6 +9,7 @@ import sys
 import random
 import slicer
 import types
+import json
 
 USE_TINY3D = True  # Set this flag based on Slicer environment
 if USE_TINY3D:
@@ -46,34 +47,29 @@ import NSM.uncertainty as uncert
 meshes.Mesh.load_mesh_scalars = safe_load_mesh_scalars
 meshes.Mesh.point_coords = property(fixed_point_coords)
 
-def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_path=None, output_folder_path=None,
+def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_path=None, input_dir=None, output_folder_path=None,
          estimate_uncertainty=False, propagation_mode='analytical', data_std=2e-5, latent_prior_std=5e-4,
          data_weight=1.0, latent_weight=1.0, mc_samples=2000, n_triangles=5000,
          n_samples=240, phase1_iters=3000, phase1_lr=1e-4, phase1_lambda_reg=1e-3,
          phase2_iters=8000, phase2_lr=1e-5, phase2_lambda_reg=1e-5, n_pts_per_axis=256,
          fast_mode=False, encoder_ckpt=None, refine_iters=0, refine_lr=None, refine_lambda_reg=None):
 
-    # Define training directory
-    TRAIN_DIR = "run_v57" # TO DO: Choose training directory containing model ckpt and latent codes
-    if model_path is None: os.chdir(TRAIN_DIR)
-    CKPT = '3000' # TO DO: Choose the ckpt value you want to analyze results for
-    LC_PATH = 'latent_codes' + '/' + CKPT + '.pth' if latent_codes_path is None else latent_codes_path
-    MODEL_PATH = 'model' + '/' + CKPT + '.pth' if model_path is None else model_path
-
     # Load model config
     config = load_config(config_path='model_params_config.json' if config_path is None else config_path)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Select matching paths of partial meshes for shape completion
-    if input_mesh_path is None:
-        mesh_dir = "fossils/models_smooth_hollow/aligned"
-        mesh_list = os.listdir(mesh_dir)
-        mesh_list = [os.path.join(mesh_dir, f) for f in random.sample(mesh_list, 5)]
-    else:
+    if input_dir is not None:
+        exts = ('.vtk', '.ply')
+        mesh_list = sorted(os.path.join(input_dir, f) for f in os.listdir(input_dir) if f.lower().endswith(exts))
+    elif input_mesh_path is not None:
         mesh_list = [input_mesh_path]
+    else:
+        mesh_dir = "fossils/models_smooth_hollow/aligned"
+        mesh_list = [os.path.join(mesh_dir, f) for f in random.sample(os.listdir(mesh_dir), 5)]
 
     # Load model and latent codes
-    model, latent_ckpt, latent_codes = load_model_and_latents(MODEL_PATH, LC_PATH, config, device)
+    model, latent_ckpt, latent_codes = load_model_and_latents(model_path, latent_codes_path, config, device)
     mean_latent = latent_codes.mean(dim=0, keepdim=True)
     latent_std = latent_codes.std().mean()
     _, top_k_reg = get_top_k_pcs(latent_codes, threshold=0.99)
@@ -168,12 +164,8 @@ def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_p
                 surface_sdf_std = propagator.sdf_uncertainty(covariance, recon_mesh_dec.points, n_samples=mc_samples)
                 
             # 6. Set SdfUncertainty scalar field
-            # Raw SDF uncertainty
             unc_raw = surface_sdf_std.detach().cpu().numpy().astype(np.float32)
-
-            # Micro-unit version for nicer Slicer visualization
             unc_um = unc_raw * 1e6
-
             recon_mesh_dec.point_data['SdfUncertainty'] = unc_raw
             recon_mesh_dec.point_data['SdfUncertainty_um'] = unc_um
             
@@ -194,8 +186,20 @@ def main(config_path=None, model_path=None, latent_codes_path=None, input_mesh_p
             mesh_pv.save(output_path)
             print(f"Completed mesh from partial pointcloud saved to: {output_path}")
 
-        with open(os.path.join(outfpath, os.path.splitext(os.path.basename(vert_fname))[0] + ".done"), "w") as f:
-            f.write(output_path)
+        entry = {"input_name": os.path.basename(vert_fname), "input_path": vert_fname, "output_path": output_path,}
+        summary_log.append(entry)
+
+        # Single-mesh mode write .done file
+        if input_dir is None:
+            with open(os.path.join(outfpath, os.path.splitext(os.path.basename(vert_fname))[0] + ".done"), "w") as f:
+                f.write(output_path)
+
+        # Batch mode write bulk_summary.json
+        if input_dir is not None:
+            summary_path = os.path.join(output_folder_path, "bulk_summary.json")
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump({"results": summary_log}, f, indent=2)
+            print(f"Batch complete. Summary written to: {summary_path}")
 
 if __name__ == "__main__":
 
@@ -212,6 +216,7 @@ if __name__ == "__main__":
     parser.add_argument('--model', type=str, default=None)
     parser.add_argument('--latent_codes', type=str, default=None)
     parser.add_argument('--input_mesh', type=str, default=None)
+    parser.add_argument('--input_dir', type=str, default=None) 
     parser.add_argument('--output_folder', type=str, default=None)
     parser.add_argument('--estimate_uncertainty', action='store_true')
     parser.add_argument('--propagation_mode', type=str, default='analytical')
@@ -250,6 +255,7 @@ if __name__ == "__main__":
                 model_path=args.model,
                 latent_codes_path=args.latent_codes,
                 input_mesh_path=args.input_mesh,
+                input_dir=args.input_dir,
                 output_folder_path=args.output_folder,
                 estimate_uncertainty=args.estimate_uncertainty,
                 propagation_mode=args.propagation_mode,
