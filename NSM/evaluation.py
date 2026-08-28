@@ -79,8 +79,8 @@ def load_best_cfg_from_csv(csv_path, fast_mode, device):
     print(f"Building config from grid search. Fast_mode={fast_mode}")
     if fast_mode:
         clamp = None if pd.isna(best_row["clamp"]) else best_row["clamp"]
-        best_cfg = {"top_k": int(best_row["top_k"]),
-                    'iters': int(best_row["iters"]),
+        best_cfg = {'top_k': int(best_row["top_k"]),
+                    'refine_iters': int(best_row["iters"]),
                     'lr': float(best_row["lr"]),
                     'lambda_reg': float(best_row["lambda_reg"]),
                     'clamp': clamp,
