@@ -125,6 +125,31 @@ else:
 mesh_pv.save(output_path)
 ```
 
+### Classification validation metrics
+
+[classification_eval.py](classification_eval.py) scores the latent space as a nearest neighbour classifier and writes precision/recall/F1 tables and confusion matrices for taxonomy, spinal region and spinal position. A query vertebra is given the labels of the training vertebra with the most similar latent code (cosine).
+
+```
+venv/bin/python classification_eval.py --run_name run_v44
+venv/bin/python classification_eval.py --run_name run_v44 --eval_level genus
+```
+
+Outputs land under `<run_name>/classification_eval/<suffix>/`: `metrics_summary.csv`, per class `report_<category>.csv`, `confusion_<category>.png`, plus `labels.csv`, `predictions.csv` and `metrics.json`.
+
+Parameters:
+
+| flag | default | description |
+| --- | --- | --- |
+| `--run_name` | required | run directory holding `model_params_config.json` and `latent_codes/`. |
+| `--checkpoint` | latest | checkpoint epoch to load. picks the highest numbered one if omitted. |
+| `--eval_level` | `specimen` | what to hide when classifying a vertebra: `loo` (only itself, optimistic upper bound), `specimen`, `species`, or `genus`. |
+| `--mapping_csv` | `vtk_name_to_mapping_v2.csv` | per vertebra taxonomy, region and normalized position. |
+| `--species_list` | `lizard_species_list.csv` | per specimen sheet with `broad_taxon_for_plotting` and life history `trait`. |
+| `--cm_max_classes` | `40` | skip the confusion matrix figure for categories with more classes than this. |
+| `--suffix` | `<eval_level>_<timestamp>` | name of the output subfolder. |
+
+Categories scored: `family`, `genus`, `species`, `broad_taxon`, `region` (cervical/thoracic/lumbar), `position_10` and `position_20` (normalized position in 10% and 20% bins), and `life_history`.
+
 ## License
 
 This code is forked and modified from [https://github.com/gattia/NSM](https://github.com/gattia/NSM) following the terms of the [GNU Affero GPL 3.0 License](https://www.gnu.org/licenses/agpl-3.0.en.html) and [NSM License](https://github.com/gattia/nsm/blob/main/LICENSE). See [NOTICE](https://github.com/3D-fossils-Haag/nsm/blob/main/NOTICE).
