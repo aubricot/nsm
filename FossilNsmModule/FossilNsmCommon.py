@@ -1,4 +1,5 @@
 import os
+import csv
 import ctk
 import qt
 import slicer
@@ -174,15 +175,45 @@ class FossilNsmCommonWidget:
         return True
 
     def onSelectInputFile(self):
-        path = qt.QFileDialog.getOpenFileName(
-            None, "Select Input Mesh", "", "Mesh Files (*.vtk *.vtp *.stl *.obj *.ply)"
-        )
+        path = qt.QFileDialog.getOpenFileName(None, "Select Input Mesh", "", "Mesh Files (*.vtk *.vtp *.stl *.obj *.ply)")
         if not path:
             return
         self.inputFilePath = path
         self.inputFileLabel.setText(path)
         self._loadedShapeCompletionLatent = None
         self.updateRunButton()
+
+    def addBatchFolderInput(self, label="Input Folder (Batch):", hint="No folder selected"):
+        self.inputFolderButton = qt.QPushButton("Select Input Folder")
+        self.inputFolderButton.connect("clicked(bool)", self.onSelectInputFolder)
+        self.inputFolderLabel = qt.QLabel(hint)
+        self.inputFolderLabel.setWordWrap(True)
+        self.inputLayout.addRow(label, self.inputFolderButton)
+        self.inputLayout.addRow("", self.inputFolderLabel)
+        self.inputFolderPath = None
+
+    def writeTable(self, base, headers, rows):
+        rows = [[("" if value is None else str(value)) for value in row] for row in rows]
+        csvPath = base + ".csv"
+        with open(csvPath, "w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(headers)
+            writer.writerows(rows)
+        return csvPath
+    
+    def pollLogFile(self, logFilePath, readPos):
+        try:
+            with open(logFilePath, "r", errors="replace") as f:
+                f.seek(readPos)
+                text = f.read()
+                if text:
+                    readPos = f.tell()
+                    for line in text.splitlines():
+                        if line.strip():
+                            self.onLogMessage(line)
+        except FileNotFoundError:
+            pass
+        return readPos
 
     def commonInputsReady(self):
         return bool(
@@ -191,8 +222,15 @@ class FossilNsmCommonWidget:
             and self.configFilePath
             and self.modelFilePath
             and self.latentCodesFilePath
-            and self.outputFolderPath
-        )
+            and self.outputFolderPath)
+    
+    def modelReady(self):
+        return bool(
+            self.modelRootPath
+            and self.configFilePath
+            and self.modelFilePath
+            and self.latentCodesFilePath
+            and self.outputFolderPath)
 
     def onLogMessage(self, message, color=None):
         html_message = str(message).replace("\n", "<br>")

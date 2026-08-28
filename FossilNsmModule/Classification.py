@@ -73,7 +73,6 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self._fossilLatentPath = None
         self._top5IndicesPath = None
         self._loadedShapeCompletionLatent = None
-        self.inputFolderPath = None
         self._bulkResults = []
         self._bulkAllLatentsPath = None
         self._pcaCoords = None
@@ -111,12 +110,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self.tabWidget.addTab(inferenceTab, "Inference")
         self.addFossilNsmInputSection(inferenceLayout)
 
-        self.inputFolderButton = qt.QPushButton("Select Input Folder")
-        self.inputFolderButton.connect("clicked(bool)", self.onSelectInputFolder)
-        self.inputFolderLabel = qt.QLabel("No folder selected (for batch classification)")
-        self.inputFolderLabel.setWordWrap(True)
-        self.inputLayout.addRow("Input Folder (Batch):", self.inputFolderButton)
-        self.inputLayout.addRow("", self.inputFolderLabel)
+        self.addBatchFolderInput(label="Input Folder (Batch):", hint="No folder selected (for batch classification)")
 
         self.loadShapeCompletionButton = qt.QPushButton("Load Shape Completion Result")
         self.loadShapeCompletionButton.connect("clicked(bool)", self.onLoadShapeCompletionResult)
@@ -473,17 +467,10 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         root = self.modelRootPath or self.outputFolderPath
         return os.path.join(root, "classification") if root else None
 
-    def _modelReady(self):
-        return bool(
-            self.modelRootPath
-            and self.configFilePath
-            and self.modelFilePath
-            and self.latentCodesFilePath
-            and self.outputFolderPath)
 
     def updateRunButton(self):
         self.classifyButton.setEnabled(self.commonInputsReady())
-        self.classifyFolderButton.setEnabled(self._modelReady() and bool(self.inputFolderPath))
+        self.classifyFolderButton.setEnabled(self.modelReady() and bool(self.inputFolderPath))
 
     def onSelectInputFolder(self):
         path = qt.QFileDialog.getExistingDirectory(None, "Select Folder of Meshes to Classify")
@@ -946,23 +933,14 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         self._clearClassificationNodes()
 
     def _pollClassification(self):
-        try:
-            with open(self._classificationLogPath, "r", errors="replace") as stream:
-                stream.seek(self._classificationLogReadPos)
-                text = stream.read()
-                self._classificationLogReadPos = stream.tell()
-                for line in text.splitlines():
-                    if line.strip():
-                        self.onLogMessage(line)
-        except FileNotFoundError:
-            pass
+        self._classificationLogReadPos = self.pollLogFile(self._classificationLogPath, self._classificationLogReadPos)
         code = self._classificationProcess.poll()
         if code is None:
             return
         self._classificationTimer.stop()
         self._classificationLog.close()
         self.classifyButton.setEnabled(self.commonInputsReady())
-        self.classifyFolderButton.setEnabled(self._modelReady())
+        self.classifyFolderButton.setEnabled(self.modelReady())
         if code != 0 or not os.path.isfile(self._classificationResultPath):
             self.onLogMessage("\n\n\nClassification failed (exit code {}).".format(code), color="red")
             return
@@ -1150,18 +1128,9 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
             return candidate
         return os.getcwd()
 
-    def _writeTable(self, base, headers, rows):
-        rows = [[("" if value is None else str(value)) for value in row] for row in rows]
-        csvPath = base + ".csv"
-        with open(csvPath, "w", newline="", encoding="utf-8") as stream:
-            writer = csv.writer(stream)
-            writer.writerow(headers)
-            writer.writerows(rows)
-        return csvPath
-
     def _autoSaveTables(self, base, headers, rows):
         try:
-            csvPath = self._writeTable(base, headers, rows)
+            csvPath = self.writeTable(base, headers, rows)
             self._noteExportDir(os.path.dirname(csvPath))
             self.onLogMessage("\n{}".format(csvPath), color="#4CAF50")
         except Exception as error:
@@ -1177,7 +1146,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         if not path:
             return
         headers, rows = self._topMatchesTable(self.classificationMatches)
-        csvPath = self._writeTable(os.path.splitext(path)[0], headers, rows)
+        csvPath = self.writeTable(os.path.splitext(path)[0], headers, rows)
         self._noteExportDir(os.path.dirname(csvPath))
         self.onLogMessage("Exported top-5 matches to:\n{}".format(csvPath), color="#4CAF50")
 
@@ -1219,7 +1188,7 @@ class ClassificationWidget(FossilNsmCommonWidget, ScriptedLoadableModuleWidget):
         if not path:
             return
         headers, rows = self._batchTable(self._bulkResults)
-        csvPath = self._writeTable(os.path.splitext(path)[0], headers, rows)
+        csvPath = self.writeTable(os.path.splitext(path)[0], headers, rows)
         self._noteExportDir(os.path.dirname(csvPath))
         self.onLogMessage("Exported batch results to:\n{}".format(csvPath), color="#4CAF50")
 
