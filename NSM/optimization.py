@@ -93,7 +93,7 @@ def optimize_latent(decoder, points, sdf_vals, latent_size, top_k, mean_latent, 
     for i in range(iters):
         optimizer.zero_grad()
         pred_sdf = get_sdfs(decoder, points, latent)
-        loss = F.l1_loss(pred_sdf.squeeze(), sdf_vals)
+        loss = F.l1_loss(pred_sdf.squeeze(), sdf_vals.squeeze())
         loss.backward()
         optimizer.step()
         if i % 200 == 0 or i == iters - 1:
