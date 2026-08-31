@@ -109,7 +109,7 @@ def encode_datasets(args):
     # Encode files fromd dataset split (train, val, test)
     ds_split_keys = {"train": "list_mesh_paths", "val": "val_paths", "test": "test_paths"}
     split_key = ds_split_keys[args.dataset_split]
-    ds_paths = [os.path.basename(p) for p in config[split_key]]
+    ds_paths = config[split_key]
     _encode_split(split_key, ds_paths, config, model, latent_codes, mean_latent, top_k_reg, device, args)
 
 if __name__ == "__main__":
