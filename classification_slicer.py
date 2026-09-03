@@ -23,7 +23,7 @@ def patch_signed_distance_dtype():
         return original(pts, points, faces)
     meshTools.pcu.signed_distance_to_mesh = signed_distance_to_mesh_patch
 
-MESH_EXTENSIONS = (".vtk", ".vtp", ".stl", ".obj", ".ply")
+MESH_EXTENSIONS = (".vtk", ".vtp", ".ply")
 
 def _list_meshes(input_dir):
     return [os.path.join(input_dir, name)
@@ -41,9 +41,7 @@ def _load_model_bundle(args, device):
     _, top_k_reg = get_top_k_pcs(latent_codes, threshold=0.99)
     return config, model, latent_codes, mean_latent, top_k_reg
 
-
 def _classify_one(mesh_path, config, model, latent_codes, mean_latent, top_k_reg, device, args, latent_path=None):
-    """Optimize a latent for one mesh and return (matches, latent_np, top_indices)."""
     if latent_path and os.path.isfile(latent_path):
         print("Loading precomputed latent from: {}".format(latent_path))
         latent = torch.as_tensor(np.load(latent_path), dtype=torch.float32, device=device)
@@ -74,11 +72,9 @@ def _classify_one(mesh_path, config, model, latent_codes, mean_latent, top_k_reg
         })
     return matches, latent.detach().cpu().numpy(), indices
 
-
 def _write_result_json(path, matches):
     with open(path, "w", encoding="utf-8") as stream:
         json.dump({"metric": "cosine distance", "matches": matches}, stream, indent=2)
-
 
 def classify(args):
     repository_root = os.path.dirname(os.path.abspath(__file__))
@@ -138,7 +134,6 @@ def classify(args):
         np.save(os.path.join(args.output_dir, "top5_indices.npy"), np.array(indices))
         _write_result_json(args.result, matches)
         print("Classification results written to " + args.result)
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

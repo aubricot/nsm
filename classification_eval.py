@@ -6,17 +6,43 @@ a query vertebra (e.g., from validation set) gets the labels of the gallery vert
 (e.g., from the training set) whose latent is most similar (cosine). 
 
 eval levels (what gets hidden when a vertebra is classified):
-    loo       hide the exact same mesh (optimistic upper bound).
-    specimen  hide the whole specimen. honest "classify a new individual" test.
+    loo       hide the exact vertebra (optimistic upper bound).
+    specimen  hide the whole specimen (all vertebrae for one specimen). honest "classify a new individual" test.
     species   hide every specimen of the same species.
     genus     hide every specimen of the same genus.
+
+# Example usage:
+#   conda activate NSM
+#   cd NSM/nsm
+
+#   Train set, leave-one-out (LOO):
+#   python classify_latents.py \
+#       --model_root run_v72 \
+#       --ckpt 2500 \
+#       --dataset_split train \
+#       --eval_level loo 
+#
+#   Train set, LOSO (specimen-level exclusion):
+#   python classify_latents.py \
+#       --model_root run_v72 \
+#       --ckpt 2500 \
+#       --dataset_split train \
+#       --eval_level specimen
+#
+#   Train set using precomputed encoded latents via optimization (from encode_latents_for_eval.py):
+#   python classify_latents.py \
+#       --model_root run_v72 \
+#       --ckpt 2500 \
+#       --dataset_split val \
+#       --encoded_latents \
+#       --eval_level specimen
+
 """
 
 import argparse
 import json
 import os
 import re
-from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -72,7 +98,16 @@ def load_species_meta(path):
         }
     return meta
 
-def build_labels(file_list, species_meta):
+def check_labels(labels, name="labels"):
+    for col in ["specimen", "family", "species", "region"]:
+        pct = 1 - labels[col].notna().mean()
+        print(f"[{name}] {col:<9} Data not matched: {pct:6.1%}")
+        if pct < 1:
+            bad = labels.loc[labels[col].isna(), "mesh"].head(3).tolist()
+            print(f"missing e.g. {bad}")
+    return labels
+
+def build_labels(file_list, species_meta, name="labels"):
     rows = []
     for f in file_list:
         info  = parse_mesh_info(f)
@@ -91,7 +126,7 @@ def build_labels(file_list, species_meta):
                      "region":       REGION_NAMES.get(info["region"]),
                      "norm_pos":     norm_pos,
                      "life_history": meta.get("life_history")})
-    return pd.DataFrame(rows)
+    return check_labels(pd.DataFrame(rows), name=name)
 
 def get_eligibility(y_q, y_g, q_hide, g_hide):
     y_q = np.asarray(y_q, dtype=object)
@@ -122,7 +157,6 @@ def rank_neighbours(q_latents, g_latents, q_hide, g_hide, topk, mask=True):
         match_matrix = (q_h[:, None] == g_h[None, :])
         valid_matrix = valid_q[:, None] & valid_g[None, :]
         sim[torch.from_numpy(match_matrix & valid_matrix)] = -2.0
-
     return torch.argsort(sim, dim=1, descending=True)[:, :topk].cpu().numpy()
 
 def evaluate_category(y_q, y_g, order, eligible=None, k_top5=5):
@@ -218,9 +252,9 @@ def main():
     config = load_config(config_path=f"{run_dir}/model_params_config.json")
     device = config.get("device", "cuda:0")
 
-    eval_tag = args.eval_level if not args.encoded_latents else args.dataset_split
-    suffix   = args.suffix or f"{eval_tag}_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}"
-    out_dir  = os.path.join(run_dir, "classification_eval", args.dataset_split, suffix)
+    eval_tag = f'{args.eval_level}_{"base" if not args.encoded_latents else "latent_opt"}'
+    suffix   = args.suffix or f"{args.dataset_split}_{eval_tag}"
+    out_dir  = os.path.join(run_dir, "classification/evaluation", args.dataset_split, suffix)
 
     ds_split_keys = {"train": "list_mesh_paths", "val": "val_paths", "test": "test_paths"}
     gallery_files = [os.path.basename(p) for p in config["list_mesh_paths"]]
@@ -236,7 +270,7 @@ def main():
 
     if args.encoded_latents:
         print(f"Loading query latents from: {args.query_latents}")
-        query_latents = torch.load(args.query_latents, map_location=device, weights_only=False).to(device)
+        query_latents = torch.load(args.query_latents, map_location=device, weights_only=True).to(device)
     else:
         query_latents = gallery_latents  # same set, eval_level masking handles exclusion
 
@@ -246,8 +280,8 @@ def main():
         raise ValueError(f"Query latents {query_latents.shape} != {len(query_files)} files.")
 
     species_meta = load_species_meta(args.species_list)
-    labels_g = build_labels(gallery_files, species_meta)
-    labels_q = build_labels(query_files,   species_meta)
+    labels_g = build_labels(gallery_files, species_meta, "gallery")
+    labels_q = build_labels(query_files,   species_meta, "query")
 
     labels_g["position_10"], order_10 = bin_positions(labels_g["norm_pos"], 10)
     labels_g["position_20"], order_20 = bin_positions(labels_g["norm_pos"], 5)
@@ -260,18 +294,18 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     labels_q.to_csv(os.path.join(out_dir, "query_labels.csv"), index=False)
 
-    mask     = not args.encoded_latents
+    mask     = True  #not args.encoded_latents ## TO DO: KW changed for testing
     group_col = "mesh" if args.eval_level == "loo" else args.eval_level
     g_hide   = labels_g[group_col].to_numpy()
     q_hide   = labels_q[group_col].to_numpy()
-    order    = rank_neighbours(query_latents, gallery_latents, q_hide, g_hide, topk=5, mask=mask)
+    order    = rank_neighbours(query_latents, gallery_latents, q_hide, g_hide, topk=50, mask=mask)
 
     cats = {"family": None, "genus": None, "species": None, "broad_taxon": None,
             "region": REGION_ORDER, "position_10": order_10, "position_20": order_20,
             "life_history": None}
     summary_rows = []
     all_json = {"run": run_dir, "ckpt": ckpt,
-                "eval_level": args.eval_level if args.dataset_split == "train" else "none",
+                "eval_level": args.eval_level,
                 "n_query": len(query_files), "n_gallery": len(gallery_files), "categories": {}}
     preds = labels_q[["mesh", "specimen"]].copy()
 
@@ -306,13 +340,13 @@ def main():
 def parse_args():
     p = argparse.ArgumentParser(description="latent space classification validation metrics")
     p.add_argument("--model_root",     required=True, help="Ex: run_v72")
-    p.add_argument("--ckpt",           default=None, help="Numeric model checkpoint to use within model_root/model/ (Ex: 2500)")
+    p.add_argument("--ckpt",           required=True, help="Ex: 2500. Numeric model checkpoint to use within model_root/model/")
     p.add_argument("--dataset_split",  choices=["train", "val", "test"], default="train")
     p.add_argument("--encoded_latents",     action="store_true",
                    help="Use precomputed encoded latents for query (val/test vs train gallery).")
     p.add_argument("--species_list",   default="lizard_species_list.csv")
     p.add_argument("--eval_level", choices=["loo", "specimen", "species", "genus"], 
-                   default="specimen", help="Leave one out masking level. Only applies when dataset_split = train.")
+                   default="specimen", help="Leave one out masking level.")
     p.add_argument("--cm_max_classes", type=int, default=40)
     p.add_argument("--suffix", default=None)
     p.add_argument("--gallery_latents", default=None, help="Path to train (gallery) latents .pth")

@@ -1,6 +1,21 @@
 """
 Bulk encode train, validation, and test sets into latent space for classification evaluation.
-Uses the same SDF sampling and optimization logic as the classification baseline.
+
+# Example usage:
+#   conda activate NSM
+#   cd NSM/nsm
+#   python encode_latents.py \
+#       --model_root run_v72 \
+#       --output_dir classification/evaluation/encoded_latents \
+#       --dataset_split val
+#
+#   python encode_latents.py \
+#       --model_root run_v72 \
+#       --output_dir classification/evaluation/encoded_latents \
+#       --dataset_split val \
+#       --iterations 1000 \
+#       --learning_rate 1e-3
+
 """
 import argparse
 import os
