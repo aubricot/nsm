@@ -87,13 +87,13 @@ def optimize_latent(decoder, points, sdf_vals, latent_size, top_k, mean_latent, 
     init_latent_torch = pca_initialize_latent(mean_latent, latent_codes, top_k) # initialize near mean using PCAs for regularization
     latent = init_latent_torch.clone().detach().requires_grad_()
     optimizer = torch.optim.Adam([latent], lr=lr)
-    sdf_vals = sdf_vals.to(device)
+    sdf_vals = sdf_vals.to(device).reshape(-1)  # Force 1D: [N]
     decoder = decoder.to(device)
     points = points.to(device)
     for i in range(iters):
         optimizer.zero_grad()
-        pred_sdf = get_sdfs(decoder, points, latent)
-        loss = F.l1_loss(pred_sdf.squeeze(), sdf_vals.squeeze())
+        pred_sdf = get_sdfs(decoder, points, latent).reshape(-1)  # Force 1D: [N]
+        loss = F.l1_loss(pred_sdf, sdf_vals)
         loss.backward()
         optimizer.step()
         if i % 200 == 0 or i == iters - 1:

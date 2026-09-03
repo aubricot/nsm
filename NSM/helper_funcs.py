@@ -87,12 +87,12 @@ def load_model_and_latents(MODEL_PATH, LC_PATH, config, device):
         'conv_pred_sdf': config['conv_pred_sdf'],
     }
     model = TriplanarDecoder(**triplane_args)
-    model_ckpt = torch.load(MODEL_PATH, map_location=device)
+    model_ckpt = torch.load(MODEL_PATH, map_location=device, weights_only=True)
     model.load_state_dict(model_ckpt['model'])
     model.to(device)
     model.eval()
     # Load latents
-    latent_ckpt = torch.load(LC_PATH, map_location=device)
+    latent_ckpt = torch.load(LC_PATH, map_location=device, weights_only=True)
     latent_codes = latent_ckpt['latent_codes']['weight'].detach().cpu()
     return model, latent_ckpt, latent_codes
 
